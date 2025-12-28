@@ -1,0 +1,10 @@
+[project]
+name = "youtube-downloader-qt5"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pillow>=12.0.0",
+    "yt-dlp>=2025.12.8",
+]
