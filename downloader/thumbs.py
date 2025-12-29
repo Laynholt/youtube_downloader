@@ -32,7 +32,7 @@ def ensure_placeholder_image(
         return p
 
     w, h = size
-    img = Image.new("RGB", (w, h), (34, 36, 41))  # тёмно-серый фон
+    img = Image.new("RGB", (w, h), (38, 45, 59))  # тёмно-серый фон
     draw = ImageDraw.Draw(img)
 
     # рамка

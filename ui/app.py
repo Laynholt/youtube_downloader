@@ -57,6 +57,15 @@ class App(tk.Tk):
         self.msg_q: "queue.Queue[GuiMsg]" = queue.Queue()
         self.tasks: Dict[str, TaskCtx] = {}
         self._playlist_batches: Dict[str, Dict[str, Any]] = {}
+        self.colors = {
+            "bg": "#222429",
+            "panel": "#262d3b",
+            "panel_alt": "#2e3547",
+            "text": "#e6e9f0",
+            "muted": "#b1b7c7",
+            "accent": "#5fa8f5",
+            "accent_hover": "#76b6f7",
+        }
 
         cfg = load_config()
         self.download_dir = str(cfg.get("download_dir") or os.path.expanduser("~/Downloads"))
@@ -68,6 +77,7 @@ class App(tk.Tk):
 
         self.default_title = "Вставьте ссылку на видео или плейлист."
 
+        self._init_theme()
         self._build_ui()
         install_layout_independent_clipboard_bindings(self)
 
@@ -76,46 +86,57 @@ class App(tk.Tk):
     # ---------------- UI ----------------
 
     def _build_ui(self) -> None:
-        top = ttk.Frame(self, padding=12)
+        top = ttk.Frame(self, padding=12, style="Panel.TFrame")
         top.pack(fill="x")
 
-        ttk.Label(top, text="Ссылка на видео:").grid(row=0, column=0, sticky="w")
+        ttk.Label(top, text="Ссылка на видео:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         self.url_var = tk.StringVar()
-        self.url_entry = ttk.Entry(top, textvariable=self.url_var, width=92)
+        self.url_entry = ttk.Entry(top, textvariable=self.url_var, width=92, style="Panel.TEntry")
         self.url_entry.grid(row=0, column=1, sticky="we", padx=(8, 8))
         self.url_entry.bind("<KeyRelease>", self._on_url_changed)
 
-        info = ttk.Frame(self, padding=(12, 0, 12, 12))
+        info = ttk.Frame(self, padding=(12, 0, 12, 12), style="Panel.TFrame")
         info.pack(fill="x")
 
         # заглушка (держим ссылку, иначе Tk её "съест" GC)
         self._current_preview_tk = load_placeholder_to_tk((260, 146))
-        self.preview_label = ttk.Label(info, image=self._current_preview_tk, width=28, anchor="center")
+        self.preview_label = ttk.Label(info, image=self._current_preview_tk, width=28, anchor="center", style="Panel.TLabel")
         self.preview_label.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 12))
 
         self.title_var = tk.StringVar(value=self.default_title)
-        ttk.Label(info, textvariable=self.title_var, font=("TkDefaultFont", 11, "bold")).grid(
+        ttk.Label(info, textvariable=self.title_var, font=("TkDefaultFont", 11, "bold"), style="PanelBold.TLabel").grid(
             row=0, column=1, sticky="w"
         )
 
         self.folder_var = tk.StringVar(value=self.download_dir)
-        folder_row = ttk.Frame(info)
+        folder_row = ttk.Frame(info, style="Panel.TFrame")
         folder_row.grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Label(folder_row, text="Папка:").pack(side="left")
-        ttk.Entry(folder_row, textvariable=self.folder_var).pack(side="left", fill="x", expand=True, padx=(8, 8))
-        ttk.Button(folder_row, text="Выбрать…", command=self._choose_folder).pack(side="left")
+        ttk.Label(folder_row, text="Папка:", style="Panel.TLabel").pack(side="left")
+        ttk.Entry(folder_row, textvariable=self.folder_var, style="Panel.TEntry").pack(side="left", fill="x", expand=True, padx=(8, 8))
+        ttk.Button(folder_row, text="Выбрать…", command=self._choose_folder, style="Accent.TButton").pack(side="left")
 
-        action = ttk.Frame(self, padding=(12, 0, 12, 12))
+        action = ttk.Frame(self, padding=(12, 0, 12, 12), style="Panel.TFrame")
         action.pack(fill="x")
-        ttk.Button(action, text="Скачать", command=self._start_download_clicked).pack(side="left")
-        ttk.Button(action, text="Очистить очередь", command=self._clear_pending_batches).pack(side="left", padx=(8, 0))
-        ttk.Label(action, text="(Можно добавлять несколько ссылок - загрузки параллельно)").pack(side="left", padx=(12, 0))
+        ttk.Button(action, text="Скачать", command=self._start_download_clicked, style="Accent.TButton").pack(side="left")
+        ttk.Button(action, text="Очистить очередь", command=self._clear_pending_batches, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+        ttk.Label(action, text="(Можно добавлять несколько ссылок - загрузки параллельно)", style="Muted.TLabel").pack(side="left", padx=(12, 0))
 
-        ttk.Separator(self).pack(fill="x", padx=12, pady=(0, 8))
-        ttk.Label(self, text="Очередь загрузок:", padding=(12, 0, 12, 6), font=("TkDefaultFont", 10, "bold")).pack(fill="x")
+        ttk.Separator(self, style="Dark.TSeparator").pack(fill="x", padx=12, pady=(0, 8))
+        header = ttk.Frame(self, padding=(12, 0, 12, 6), style="Bg.TFrame")
+        header.pack(fill="x")
+        ttk.Label(
+            header,
+            text="Очередь загрузок",
+            padding=(0, 0, 0, 0),
+            font=("TkDefaultFont", 12, "bold"),
+            style="BgBold.TLabel",
+            anchor="center",
+            justify="center",
+        ).pack(fill="x")
 
-        self.scroll = ScrollableFrame(self)
+        self.scroll = ScrollableFrame(self, background=self.colors["bg"])
         self.scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.scroll.set_background(self.colors["bg"])
 
         top.grid_columnconfigure(1, weight=1)
         info.grid_columnconfigure(1, weight=1)
@@ -127,12 +148,103 @@ class App(tk.Tk):
         cfg["download_dir"] = path
         save_config(cfg)
 
+    def _init_theme(self) -> None:
+        colors = self.colors
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        self.configure(bg=colors["bg"])
+        style.configure("Panel.TFrame", background=colors["panel"])
+        style.configure("Bg.TFrame", background=colors["bg"])
+
+        style.configure("Panel.TLabel", background=colors["panel"], foreground=colors["text"])
+        style.configure("PanelBold.TLabel", background=colors["panel"], foreground=colors["text"])
+        style.configure("Muted.TLabel", background=colors["panel"], foreground=colors["muted"])
+        style.configure("Bg.TLabel", background=colors["bg"], foreground=colors["text"])
+        style.configure("BgBold.TLabel", background=colors["bg"], foreground=colors["text"])
+
+        style.configure(
+            "TButton",
+            background=colors["panel_alt"],
+            foreground=colors["text"],
+            borderwidth=1,
+            focusthickness=1,
+            focuscolor=colors["accent"],
+        )
+        style.map("TButton", background=[("active", colors["accent_hover"])], foreground=[("active", colors["text"])])
+        style.configure(
+            "Accent.TButton",
+            background=colors["accent"],
+            foreground=colors["bg"],
+            borderwidth=0,
+            focusthickness=1,
+            focuscolor=colors["accent_hover"],
+            padding=(10, 6),
+        )
+        style.map("Accent.TButton", background=[("active", colors["accent_hover"])], foreground=[("active", colors["bg"])])
+        style.configure(
+            "Ghost.TButton",
+            background=colors["panel"],
+            foreground=colors["text"],
+            borderwidth=1,
+            focusthickness=1,
+            focuscolor=colors["accent"],
+            padding=(10, 6),
+        )
+        style.map("Ghost.TButton", background=[("active", colors["panel_alt"])], foreground=[("active", colors["text"])])
+
+        style.configure(
+            "Panel.TEntry",
+            fieldbackground=colors["panel_alt"],
+            background=colors["panel_alt"],
+            foreground=colors["text"],
+            insertcolor=colors["text"],
+            bordercolor=colors["panel_alt"],
+            lightcolor=colors["panel_alt"],
+            darkcolor=colors["panel_alt"],
+            padding=4,
+        )
+
+        style.configure(
+            "Dark.TSeparator",
+            background=colors["panel"],
+            foreground=colors["panel"],
+            bordercolor=colors["panel"],
+            lightcolor=colors["panel"],
+            darkcolor=colors["panel"],
+        )
+
+        style.configure(
+            "Horizontal.TProgressbar",
+            background=colors["accent"],
+            troughcolor=colors["panel_alt"],
+            lightcolor=colors["accent"],
+            darkcolor=colors["accent"],
+            bordercolor=colors["panel_alt"],
+        )
+
+        style.configure(
+            "Dark.Vertical.TScrollbar",
+            troughcolor=colors["bg"],
+            background=colors["panel_alt"],
+            bordercolor=colors["panel_alt"],
+            arrowcolor=colors["text"],
+            lightcolor=colors["panel_alt"],
+            darkcolor=colors["panel_alt"],
+        )
+
+        style.configure("Treeview", background=colors["panel"], fieldbackground=colors["panel"], foreground=colors["text"])
+        style.map("Treeview", background=[("selected", colors["panel_alt"])])
+
     def _clear_pending_batches(self) -> None:
         """
         Удаляет все ожидающие пачки плейлистов (оставляя текущие активные загрузки).
         """
         self._playlist_batches.clear()
-        messagebox.showinfo("Очередь", "Ожидающие загрузки видео отчищены.\nТекущие загрузки незатронуты.")
+        messagebox.showinfo("Очередь", "Ожидающие загрузки видео очищены.\nТекущие загрузки незатронуты.")
 
     # -------------- URL debounce --------
 
