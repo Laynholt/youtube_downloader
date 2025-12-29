@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 from downloader.ytdlp_client import (
     VideoInfo, TaskRuntime,
     fetch_video_info, download_task,
-    probe_url_kind, expand_playlist,
+    probe_url_kind, expand_playlist, set_cookies_file,
 )
 from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
 from downloader.cleanup import delete_task_files
@@ -74,6 +74,8 @@ class App(tk.Tk):
         self.download_dir = str(cfg.get("download_dir") or default_download_dir())
         if not self.download_dir:
             self.download_dir = str(default_download_dir())
+        self.cookies_path = str(cfg.get("cookies_path") or "")
+        set_cookies_file(self.cookies_path or None)
 
         self._debounce_job: Optional[str] = None
         self._current_preview_tk: Optional[Any] = None
@@ -141,6 +143,13 @@ class App(tk.Tk):
         add_tooltip(btn_clear, "Удалить все ожидающие пачки плейлистов.")
         ttk.Label(action, text="(Можно добавлять несколько ссылок - загрузки параллельно)", style="Muted.TLabel").pack(side="left", padx=(12, 0))
 
+        spacer = ttk.Frame(action, style="Panel.TFrame")
+        spacer.pack(side="left", expand=True, fill="x")
+
+        btn_settings = ttk.Button(action, text="Настройки", command=self._open_settings, style="Ghost.TButton")
+        btn_settings.pack(side="right")
+        add_tooltip(btn_settings, "Открыть настройки (cookies и др.).")
+
         ttk.Separator(self, style="Dark.TSeparator").pack(fill="x", padx=12, pady=(0, 8))
         header = ttk.Frame(self, padding=(12, 0, 12, 6), style="Bg.TFrame")
         header.pack(fill="x")
@@ -164,8 +173,16 @@ class App(tk.Tk):
     # -------------- Config --------------
 
     def _save_download_dir(self, path: str) -> None:
+        self._update_config(download_dir=path)
+
+    def _save_cookies_path(self, path: str) -> None:
+        self.cookies_path = path
+        set_cookies_file(path or None)
+        self._update_config(cookies_path=path)
+
+    def _update_config(self, **kwargs: Any) -> None:
         cfg = load_config()
-        cfg["download_dir"] = path
+        cfg.update(kwargs)
         save_config(cfg)
 
     def _init_theme(self) -> None:
@@ -338,6 +355,56 @@ class App(tk.Tk):
             self._on_url_changed(event)
             return "break"
         return None
+
+    # -------------- Settings ------------
+
+    def _open_settings(self) -> None:
+        win = tk.Toplevel(self)
+        win.title("Настройки")
+        try:
+            win.iconbitmap("assets/icon.ico")
+        except Exception:
+            pass
+        win.configure(bg=self.colors["panel"])
+        win.transient(self)
+        win.grab_set()
+        win.resizable(False, False)
+
+        frame = ttk.Frame(win, padding=14, style="Panel.TFrame")
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Cookies файл (yt-dlp):", style="PanelBold.TLabel").grid(row=0, column=0, sticky="w")
+
+        cookies_var = tk.StringVar(value=self.cookies_path)
+        entry = ttk.Entry(frame, textvariable=cookies_var, width=52, style="Panel.TEntry")
+        entry.grid(row=1, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        add_tooltip(
+            entry,
+            "Файл cookies в формате Netscape. Можно экспортировать из браузера (yt-dlp --cookies-from-browser ... --cookies file.txt).",
+        )
+
+        def choose_file() -> None:
+            path = filedialog.askopenfilename(
+                title="Выберите файл cookies",
+                initialdir=os.path.dirname(cookies_var.get() or self.download_dir),
+            )
+            if path:
+                cookies_var.set(path)
+
+        ttk.Button(frame, text="Выбрать…", style="Accent.TButton", command=choose_file).grid(row=1, column=2, padx=(8, 0), pady=(6, 0))
+
+        def save_and_close() -> None:
+            path = cookies_var.get().strip()
+            self._save_cookies_path(path)
+            win.destroy()
+
+        btns = ttk.Frame(frame, style="Panel.TFrame")
+        btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(12, 0))
+
+        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save_and_close).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="Отмена", style="Ghost.TButton", command=win.destroy).pack(side="right")
+
+        frame.grid_columnconfigure(0, weight=1)
 
     # -------------- URL debounce --------
 

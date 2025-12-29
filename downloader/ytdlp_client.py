@@ -36,6 +36,7 @@ class TaskRuntime:
 
 
 _logger = logging.getLogger("ytdl")
+_cookies_file: Optional[str] = None
 if not _logger.handlers:
     _logger.setLevel(logging.INFO)
     try:
@@ -50,6 +51,17 @@ if not _logger.handlers:
         _logger.addHandler(sh)
 
 
+def set_cookies_file(path: Optional[str]) -> None:
+    global _cookies_file
+    if path and os.path.isfile(path):
+        _cookies_file = path
+        _logger.info("Using cookies file: %s", path)
+    else:
+        if path:
+            _logger.warning("Cookies file not found: %s (ignoring)", path)
+        _cookies_file = None
+
+
 def fetch_video_info(url: str) -> VideoInfo:
     _logger.info("Fetch info: %s", url)
     ydl_opts: Dict[str, Any] = {
@@ -59,6 +71,8 @@ def fetch_video_info(url: str) -> VideoInfo:
         "extract_flat": False,
         "noplaylist": True,
     }
+    if _cookies_file:
+        ydl_opts["cookies"] = _cookies_file
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
@@ -180,6 +194,8 @@ def download_task(
         "progress_hooks": [progress_hook],
         "postprocessor_hooks": [postprocessor_hook],
     }
+    if _cookies_file:
+        ydl_opts["cookies"] = _cookies_file
 
     if not has_ffmpeg():
         msg = "ffmpeg не найден: качаю единый файл (best)"
@@ -220,6 +236,8 @@ def probe_url_kind(url: str) -> tuple[str, dict]:
         "noplaylist": False,       # разрешаем плейлисты
         "socket_timeout": 20,
     }
+    if _cookies_file:
+        ydl_opts["cookies"] = _cookies_file
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
@@ -280,6 +298,8 @@ def expand_playlist(url: str) -> tuple[str, list[VideoInfo]]:
         "noplaylist": False,
         "socket_timeout": 20,
     }
+    if _cookies_file:
+        ydl_opts["cookies"] = _cookies_file
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
