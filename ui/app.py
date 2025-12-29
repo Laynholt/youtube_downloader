@@ -1,0 +1,428 @@
+from __future__ import annotations
+
+import os
+import queue
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from typing import Any, Dict, Optional, Tuple
+
+from downloader.ytdlp_client import (
+    VideoInfo, TaskRuntime,
+    fetch_video_info, download_task,
+    probe_url_kind, expand_playlist,
+)
+from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
+from downloader.cleanup import delete_task_files
+
+from utils.config import load_config, save_config
+from utils.clipboard import install_layout_independent_clipboard_bindings
+
+from .widgets import ScrollableFrame, TaskRow
+
+GuiMsg = Tuple[str, str, Dict[str, Any]]  # ("task_update", task_id, fields)
+
+
+class TaskCtx:
+    def __init__(self, *, task_id: str, info: VideoInfo, out_dir: str) -> None:
+        self.task_id = task_id
+        self.info = info
+        self.out_dir = out_dir
+
+        self.pause_flag = threading.Event()
+        self.cancel_flag = threading.Event()
+        self.soft_cancelled = False
+
+        self.runtime = TaskRuntime(pause_flag=self.pause_flag, cancel_flag=self.cancel_flag)
+        self.worker: Optional[threading.Thread] = None
+        self.row: Optional[TaskRow] = None
+
+
+class App(tk.Tk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.title("YouTube Downloader")
+        self.geometry("980x560")
+        self.minsize(980, 560)
+
+        self.msg_q: "queue.Queue[GuiMsg]" = queue.Queue()
+        self.tasks: Dict[str, TaskCtx] = {}
+
+        cfg = load_config()
+        self.download_dir = str(cfg.get("download_dir") or os.path.expanduser("~/Downloads"))
+        if not self.download_dir:
+            self.download_dir = os.path.expanduser("~/Downloads")
+
+        self._debounce_job: Optional[str] = None
+        self._current_preview_tk: Optional[Any] = None
+
+        self.default_title = "Вставьте ссылку на видео или плейлист."
+
+        self._build_ui()
+        install_layout_independent_clipboard_bindings(self)
+
+        self.after(80, self._poll_queue)
+
+    # ---------------- UI ----------------
+
+    def _build_ui(self) -> None:
+        top = ttk.Frame(self, padding=12)
+        top.pack(fill="x")
+
+        ttk.Label(top, text="Ссылка на видео:").grid(row=0, column=0, sticky="w")
+        self.url_var = tk.StringVar()
+        self.url_entry = ttk.Entry(top, textvariable=self.url_var, width=92)
+        self.url_entry.grid(row=0, column=1, sticky="we", padx=(8, 8))
+        self.url_entry.bind("<KeyRelease>", self._on_url_changed)
+
+        info = ttk.Frame(self, padding=(12, 0, 12, 12))
+        info.pack(fill="x")
+
+        # заглушка (держим ссылку, иначе Tk её "съест" GC)
+        self._current_preview_tk = load_placeholder_to_tk((260, 146))
+        self.preview_label = ttk.Label(info, image=self._current_preview_tk, width=28, anchor="center")
+        self.preview_label.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 12))
+
+        self.title_var = tk.StringVar(value=self.default_title)
+        ttk.Label(info, textvariable=self.title_var, font=("TkDefaultFont", 11, "bold")).grid(
+            row=0, column=1, sticky="w"
+        )
+
+        self.folder_var = tk.StringVar(value=self.download_dir)
+        folder_row = ttk.Frame(info)
+        folder_row.grid(row=1, column=1, sticky="we", pady=(8, 0))
+        ttk.Label(folder_row, text="Папка:").pack(side="left")
+        ttk.Entry(folder_row, textvariable=self.folder_var).pack(side="left", fill="x", expand=True, padx=(8, 8))
+        ttk.Button(folder_row, text="Выбрать…", command=self._choose_folder).pack(side="left")
+
+        action = ttk.Frame(self, padding=(12, 0, 12, 12))
+        action.pack(fill="x")
+        ttk.Button(action, text="Скачать", command=self._start_download_clicked).pack(side="left")
+        ttk.Label(action, text="(Можно добавлять несколько ссылок — загрузки параллельно)").pack(side="left", padx=(12, 0))
+
+        ttk.Separator(self).pack(fill="x", padx=12, pady=(0, 8))
+        ttk.Label(self, text="Очередь загрузок:", padding=(12, 0, 12, 6), font=("TkDefaultFont", 10, "bold")).pack(fill="x")
+
+        self.scroll = ScrollableFrame(self)
+        self.scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        top.grid_columnconfigure(1, weight=1)
+        info.grid_columnconfigure(1, weight=1)
+
+    # -------------- Config --------------
+
+    def _save_download_dir(self, path: str) -> None:
+        cfg = load_config()
+        cfg["download_dir"] = path
+        save_config(cfg)
+
+    # -------------- URL debounce --------
+
+    def _on_url_changed(self, _event: tk.Event) -> None:
+        if self._debounce_job is not None:
+            try:
+                self.after_cancel(self._debounce_job)
+            except Exception:
+                pass
+        self._debounce_job = self.after(800, self._auto_fetch_if_possible)
+
+    def _auto_fetch_if_possible(self) -> None:
+        self._debounce_job = None
+        url = self.url_var.get().strip()
+        if not url:
+            return
+        if "youtu" not in url and "youtube" not in url:
+            return
+        self._fetch_info_clicked()
+
+    # -------------- Preview fetch -------
+
+    def _fetch_info_clicked(self) -> None:
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showwarning("Ссылка", "Вставьте ссылку на видео.")
+            return
+
+        self.title_var.set("Получаю информацию…")
+        # оставляем картинку-заглушку, просто убираем текст (если был)
+        self.preview_label.configure(text="")
+
+        def worker() -> None:
+            try:
+                info = fetch_video_info(url)
+                self.msg_q.put(("task_update", "__preview__", {"info": info}))
+            except Exception as e:
+                self.msg_q.put(("task_update", "__preview__", {"error": str(e)}))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_preview_info(self, info: VideoInfo) -> None:
+        self.title_var.set(info.title)
+
+        if info.thumbnail_url:
+            def thumb_worker() -> None:
+                try:
+                    tk_img = download_thumbnail_to_tk(info.thumbnail_url, max_size=(260, 146))
+                    self.msg_q.put(("task_update", "__preview__", {"thumb_tk": tk_img}))
+                except Exception:
+                    self.msg_q.put(("task_update", "__preview__", {"thumb_err": True}))
+
+            threading.Thread(target=thumb_worker, daemon=True).start()
+        else:
+            self._current_preview_tk = load_placeholder_to_tk((260, 146))
+            self.preview_label.configure(image=self._current_preview_tk, text="")
+
+    # -------------- Folder --------------
+
+    def _choose_folder(self) -> None:
+        d = filedialog.askdirectory(initialdir=self.folder_var.get() or self.download_dir)
+        if d:
+            self.folder_var.set(d)
+            self.download_dir = d
+            self._save_download_dir(d)
+
+    # -------------- Download start ------
+    def _create_task_from_videoinfo(self, info: VideoInfo, out_dir: str) -> None:
+        task_id = os.urandom(6).hex()
+        ctx = TaskCtx(task_id=task_id, info=info, out_dir=out_dir)
+        self.tasks[task_id] = ctx
+
+        def on_pause() -> None:
+            self._pause_toggle(task_id)
+
+        def on_cancel_soft() -> None:
+            self._soft_cancel(task_id)
+
+        def on_resume() -> None:
+            self._resume(task_id)
+
+        def on_delete() -> None:
+            self._delete(task_id)
+
+        def on_close() -> None:
+            self._close(task_id)
+
+        row = TaskRow(
+            self.scroll.inner,
+            title=ctx.info.title,
+            on_pause=on_pause,
+            on_cancel_soft=on_cancel_soft,
+            on_resume=on_resume,
+            on_delete=on_delete,
+            on_close=on_close,
+        )
+        row.pack(fill="x", expand=True, pady=6)
+        ctx.row = row
+
+        # подтянуть полное info + превью (как и раньше)
+        url = info.url
+
+        def info_worker() -> None:
+            try:
+                full = fetch_video_info(url)
+                self.msg_q.put(("task_update", task_id, {"info": full}))
+                if full.thumbnail_url:
+                    try:
+                        tk_img = download_thumbnail_to_tk(full.thumbnail_url, max_size=(200, 112))
+                        self.msg_q.put(("task_update", task_id, {"thumb_tk": tk_img}))
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.msg_q.put(("task_update", task_id, {"status": f"Инфо не получено: {e}"}))
+
+        threading.Thread(target=info_worker, daemon=True).start()
+
+        # запуск скачивания
+        def update(tid: str, fields: Dict[str, Any]) -> None:
+            self.msg_q.put(("task_update", tid, fields))
+
+        def dl_worker() -> None:
+            download_task(task_id=task_id, info=ctx.info, out_dir=ctx.out_dir, runtime=ctx.runtime, update=update)
+
+        t = threading.Thread(target=dl_worker, daemon=True)
+        ctx.worker = t
+        t.start()
+
+
+    def _start_download_clicked(self) -> None:
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showwarning("Ссылка", "Вставьте ссылку на видео или плейлист.")
+            return
+
+        out_dir = (self.folder_var.get().strip() or self.download_dir).strip()
+        os.makedirs(out_dir, exist_ok=True)
+
+        self.download_dir = out_dir
+        self._save_download_dir(out_dir)
+
+        # Чтобы UI не фризился — распознаём/разворачиваем в фоне
+        def worker() -> None:
+            try:
+                kind, _ = probe_url_kind(url)
+                if kind == "playlist":
+                    pl_title, videos = expand_playlist(url)
+                    if not videos:
+                        self.msg_q.put(("task_update", "__ui__", {"ui_error": "Плейлист пустой или не удалось прочитать entries"}))
+                        return
+                    # отправим в UI пачку для добавления
+                    self.msg_q.put(("task_update", "__ui__", {"enqueue_many": videos, "playlist_title": pl_title}))
+                else:
+                    # обычное видео — создаём один таск
+                    initial_title = self.title_var.get()
+                    if not initial_title or initial_title == self.default_title:
+                        initial_title = "—"
+                    vi = VideoInfo(url=url, title=initial_title)
+                    self.msg_q.put(("task_update", "__ui__", {"enqueue_one": vi}))
+            except Exception as e:
+                self.msg_q.put(("task_update", "__ui__", {"ui_error": str(e)}))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+    # -------------- Task actions --------
+
+    def _pause_toggle(self, task_id: str) -> None:
+        ctx = self.tasks.get(task_id)
+        if not ctx or not ctx.row or ctx.soft_cancelled:
+            return
+
+        if ctx.pause_flag.is_set():
+            ctx.pause_flag.clear()
+            ctx.row.set_mode("normal", paused=False)
+        else:
+            ctx.pause_flag.set()
+            ctx.row.update_fields({"status": "Пауза:"})
+            ctx.row.set_mode("normal", paused=True)
+
+    def _soft_cancel(self, task_id: str) -> None:
+        ctx = self.tasks.get(task_id)
+        if not ctx or not ctx.row:
+            return
+
+        ctx.soft_cancelled = True
+        ctx.pause_flag.set()
+        ctx.row.set_mode("soft_cancelled")
+        ctx.row.update_fields({"status": "Пауза (отменено):", "speed": "", "eta": "", "total": "", "pct_text": ""})
+
+    def _resume(self, task_id: str) -> None:
+        ctx = self.tasks.get(task_id)
+        if not ctx or not ctx.row:
+            return
+
+        ctx.soft_cancelled = False
+        ctx.pause_flag.clear()
+        ctx.row.set_mode("normal", paused=False)
+        ctx.row.update_fields({"status": "Возобновлено:"})
+
+    def _delete(self, task_id: str) -> None:
+        ctx = self.tasks.get(task_id)
+        if not ctx or not ctx.row:
+            return
+
+        ctx.row.set_mode("disabled")
+        ctx.row.update_fields({"status": "Удаление:", "speed": "", "eta": "", "total": "", "pct_text": ""})
+
+        ctx.cancel_flag.set()
+        ctx.pause_flag.clear()
+
+        def cleanup() -> None:
+            th = ctx.worker
+            if th is not None and th.is_alive():
+                th.join(timeout=2.0)
+
+            removed, errs = delete_task_files(ctx.runtime.seen_files)
+
+            def ui_remove() -> None:
+                self._close(task_id)
+                if errs:
+                    messagebox.showwarning(
+                        "Удаление файлов",
+                        f"Удалено файлов: {removed}\n\nНе удалось удалить (возможно заняты):\n"
+                        + "\n".join(errs[:10])
+                        + ("\n…" if len(errs) > 10 else ""),
+                    )
+
+            self.after(0, ui_remove)
+
+        threading.Thread(target=cleanup, daemon=True).start()
+
+    def _close(self, task_id: str) -> None:
+        ctx = self.tasks.pop(task_id, None)
+        if not ctx:
+            return
+        if ctx.row is not None:
+            try:
+                ctx.row.destroy()
+            except Exception:
+                pass
+
+    # -------------- Queue polling -------
+
+    def _poll_queue(self) -> None:
+        try:
+            while True:
+                msg_type, task_id, fields = self.msg_q.get_nowait()
+                if msg_type != "task_update":
+                    continue
+
+                if task_id == "__preview__":
+                    if "error" in fields:
+                        self.title_var.set("Не удалось получить информацию")
+                        self.preview_label.configure(text="Ошибка", image="")
+                        self._current_preview_tk = None
+                    if "info" in fields and isinstance(fields["info"], VideoInfo):
+                        self._apply_preview_info(fields["info"])
+                    if "thumb_tk" in fields:
+                        self._current_preview_tk = fields["thumb_tk"]
+                        self.preview_label.configure(image=self._current_preview_tk, text="")
+                    if "thumb_err" in fields:
+                        self._current_preview_tk = load_placeholder_to_tk((260, 146))
+                        self.preview_label.configure(image=self._current_preview_tk, text="")
+                    continue
+                
+                if task_id == "__ui__":
+                    if "ui_error" in fields:
+                        messagebox.showerror("Ошибка", str(fields["ui_error"]))
+                        continue
+
+                    if "enqueue_one" in fields and isinstance(fields["enqueue_one"], VideoInfo):
+                        self._create_task_from_videoinfo(fields["enqueue_one"], self.download_dir)
+                        continue
+
+                    if "enqueue_many" in fields and isinstance(fields["enqueue_many"], list):
+                        videos = fields["enqueue_many"]
+                        # Можно показать инфо (не обязательно)
+                        # pl_title = str(fields.get("playlist_title") or "Плейлист")
+                        for vi in videos:
+                            if isinstance(vi, VideoInfo):
+                                self._create_task_from_videoinfo(vi, self.download_dir)
+                        continue
+
+
+                ctx = self.tasks.get(task_id)
+                if not ctx or not ctx.row:
+                    continue
+
+                if "info" in fields and isinstance(fields["info"], VideoInfo):
+                    ctx.info = fields["info"]
+                    # важно: downloader получает ссылку на ctx.info при запуске,
+                    # но обновления title/format_kind нам важны для UI и определения video/audio
+                    ctx.row.title_var.set(ctx.info.title)
+
+                if "thumb_tk" in fields:
+                    ctx.row.set_thumbnail(fields["thumb_tk"])
+
+                ctx.row.update_fields(fields)
+
+                status = str(fields.get("status") or "")
+                if status == "Готово":
+                    ctx.row.set_mode("done")
+                elif status.startswith("Ошибка"):
+                    if not ctx.soft_cancelled:
+                        ctx.row.set_mode("disabled")
+
+        except queue.Empty:
+            pass
+        finally:
+            self.after(80, self._poll_queue)
