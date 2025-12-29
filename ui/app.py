@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from typing import Any, Dict, Optional, Tuple
 
+import sys
 from downloader.ytdlp_client import (
     VideoInfo, TaskRuntime,
     fetch_video_info, download_task,
@@ -21,6 +22,7 @@ from ui.dialogs import show_error, show_info, show_warning, ask_yes_no
 from ui.tooltips import add_tooltip
 from utils.clipboard import install_layout_independent_clipboard_bindings
 from utils.ffmpeg_installer import find_ffmpeg, install_ffmpeg
+from utils.updater import fetch_latest_release, compare_versions, install_update_from_url
 
 from .widgets import ScrollableFrame, TaskRow
 
@@ -242,6 +244,117 @@ class App(tk.Tk):
                 self.msg_q.put(("task_update", "__ui__", {"ui_error": msg}))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # -------------- Updates -------------
+
+    def _on_check_updates_clicked(self) -> None:
+        def worker() -> None:
+            try:
+                latest = fetch_latest_release()
+                latest_ver = latest.get("version") or ""
+                download_url = latest.get("download_url") or ""
+                page_url = latest.get("page_url") or ""
+                current_ver = get_app_version()
+                cmp = compare_versions(latest_ver or "0", current_ver or "0")
+                is_frozen = bool(getattr(sys, "frozen", False))
+                self.msg_q.put(
+                    (
+                        "task_update",
+                        "__ui__",
+                        {
+                            "update_check": {
+                                "latest": latest_ver,
+                                "download_url": download_url,
+                                "page_url": page_url,
+                                "current": current_ver,
+                                "cmp": cmp,
+                                "frozen": is_frozen,
+                            }
+                        },
+                    )
+                )
+            except Exception as e:
+                self.msg_q.put(("task_update", "__ui__", {"ui_error": f"Не удалось проверить обновления: {e}"}))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_update_check(self, data: Dict[str, Any]) -> None:
+        latest = data.get("latest") or ""
+        current = data.get("current") or ""
+        cmp = int(data.get("cmp") or 0)
+        frozen = bool(data.get("frozen"))
+        download_url = data.get("download_url") or ""
+        page_url = data.get("page_url") or ""
+
+        if cmp <= 0 or not latest:
+            show_info("Обновления", f"У вас актуальная версия ({current}).", parent=self)
+            return
+
+        if not frozen:
+            msg = (
+                f"Доступна новая версия: {latest} (у вас {current}).\n\n"
+                f"Запустите 'git pull' или скачайте с {page_url}."
+            )
+            show_info("Обновления", msg, parent=self)
+            return
+
+        consent = ask_yes_no(
+            "Обновление доступно",
+            f"Доступна новая версия: {latest} (у вас {current}).\n\n"
+            "Скачать и установить сейчас?",
+            parent=self,
+            yes="Установить",
+            no="Позже",
+        )
+        if not consent:
+            return
+
+        def worker() -> None:
+            def progress(msg: str) -> None:
+                self.msg_q.put(("task_update", "__ui__", {"ui_info": msg}))
+
+            ok, msg = install_update_from_url(download_url, progress=progress)
+            if ok:
+                self.msg_q.put(("task_update", "__ui__", {"ui_info": msg}))
+            else:
+                self.msg_q.put(("task_update", "__ui__", {"ui_error": msg}))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_about(self) -> None:
+        win = tk.Toplevel(self)
+        win.title("О программе")
+        try:
+            win.iconbitmap("assets/icon.ico")
+        except Exception:
+            pass
+        win.configure(bg=self.colors["panel"])
+        win.transient(self)
+        win.grab_set()
+        win.resizable(False, False)
+
+        frame = ttk.Frame(win, padding=14, style="Panel.TFrame")
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="YouTube Downloader", style="PanelBold.TLabel", font=("TkDefaultFont", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, text=f"Версия: {get_app_version()}", style="Panel.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(frame, text="Автор: laynholt", style="Panel.TLabel").grid(row=2, column=0, sticky="w")
+
+        btns = ttk.Frame(frame, style="Panel.TFrame")
+        btns.grid(row=3, column=0, sticky="we", pady=(12, 0))
+        ttk.Button(btns, text="Проверить обновления", style="Ghost.TButton", command=self._on_check_updates_clicked).pack(side="left", padx=(0, 10))
+        ttk.Button(btns, text="Закрыть", style="Accent.TButton", command=win.destroy).pack(side="right")
+
+        frame.grid_columnconfigure(0, weight=1)
+
+        win.update_idletasks()
+        desired_w = max(320, win.winfo_width() + 60)
+        desired_h = win.winfo_height()
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        x = max(0, (screen_w - desired_w) // 2)
+        y = max(0, (screen_h - desired_h) // 2)
+        win.geometry(f"{desired_w}x{desired_h}+{x}+{y}")
 
     def _init_theme(self) -> None:
         colors = self.colors
@@ -509,10 +622,10 @@ class App(tk.Tk):
 
         btns = ttk.Frame(frame, style="Panel.TFrame")
         btns.grid(row=4, column=0, columnspan=3, sticky="we", pady=(12, 0))
-        ttk.Label(btns, text=f"Версия: {get_app_version()}  |  Автор: laynholt", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save_and_close).grid(row=0, column=2, sticky="e", padx=(8, 0))
-        ttk.Button(btns, text="Отмена", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, sticky="e")
-        btns.grid_columnconfigure(0, weight=1)
+        ttk.Button(btns, text="О программе", style="Ghost.TButton", command=self._open_about).grid(row=0, column=0, sticky="w")
+        ttk.Button(btns, text="Отмена", style="Ghost.TButton", command=win.destroy).grid(row=0, column=2, sticky="e")
+        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save_and_close).grid(row=0, column=3, sticky="e", padx=(8, 0))
+        btns.grid_columnconfigure(1, weight=1)
 
         frame.grid_columnconfigure(0, weight=1)
 
@@ -865,6 +978,10 @@ class App(tk.Tk):
 
                     if "ui_warning" in fields:
                         show_warning("Предупреждение", str(fields["ui_warning"]), parent=self)
+                        continue
+
+                    if "update_check" in fields:
+                        self._handle_update_check(fields["update_check"])
                         continue
 
                     if "enqueue_one" in fields and isinstance(fields["enqueue_one"], VideoInfo):
