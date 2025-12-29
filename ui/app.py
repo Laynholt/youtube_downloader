@@ -406,6 +406,15 @@ class App(tk.Tk):
 
         frame.grid_columnconfigure(0, weight=1)
 
+        win.update_idletasks()
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        win_w = win.winfo_width()
+        win_h = win.winfo_height()
+        x = max(0, (screen_w - win_w) // 2)
+        y = max(0, (screen_h - win_h) // 2)
+        win.geometry(f"+{x}+{y}")
+
     # -------------- URL debounce --------
 
     def _on_url_changed(self, _event: tk.Event) -> None:
