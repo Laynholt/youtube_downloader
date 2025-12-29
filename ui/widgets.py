@@ -83,7 +83,8 @@ class TaskRow(ttk.Frame):
 
         self.title_var = tk.StringVar(value=title)
         self.status_var = tk.StringVar(value="Ожидание")
-        self.meta_var = tk.StringVar(value=self._format_meta("—", "—", "—", "—"))
+        self.quality_var = tk.StringVar(value="-")
+        self.meta_var = tk.StringVar(value=self._format_meta("-", "-", "-", "-", "-"))
 
         ttk.Label(self, textvariable=self.title_var, font=("TkDefaultFont", 10, "bold"), style="PanelBold.TLabel").grid(
             row=0, column=1, columnspan=5, sticky="w"
@@ -108,8 +109,8 @@ class TaskRow(ttk.Frame):
         self.mode: str = "normal"  # normal | soft_cancelled | done | disabled
 
     @staticmethod
-    def _format_meta(speed: str, eta: str, total: str, pct: str) -> str:
-        return f"Скорость: {speed}  |  ETA: {eta}  |  Размер: {total}  |  {pct}"
+    def _format_meta(quality: str, speed: str, eta: str, total: str, pct: str) -> str:
+        return f"Качество: {quality}  |  Скорость: {speed}  |  ETA: {eta}  |  Размер: {total}  |  {pct}"
 
     def set_thumbnail(self, tk_img: Any) -> None:
         self._tk_thumb = tk_img
@@ -154,7 +155,10 @@ class TaskRow(ttk.Frame):
             except Exception:
                 pass
 
-        # По ТЗ: если "Готово" — только этот текст и без мета-инфо
+        if "quality" in fields and fields["quality"] not in (None, ""):
+            self.quality_var.set(str(fields["quality"]))
+
+        # По ТЗ: если "Готово" - только этот текст и без мета-инфо
         if self.status_var.get() == "Готово":
             self.meta_var.set("")
             return
@@ -163,13 +167,15 @@ class TaskRow(ttk.Frame):
         eta = fields.get("eta")
         total = fields.get("total")
         pct = fields.get("pct_text")
+        quality = self.quality_var.get()
 
-        if speed is not None or eta is not None or total is not None or pct is not None:
-            speed_txt = speed if (speed not in (None, "")) else "—"
-            eta_txt = eta if (eta not in (None, "")) else "—"
-            total_txt = total if (total not in (None, "")) else "—"
-            pct_txt = pct if (pct not in (None, "")) else "—"
-            self.meta_var.set(self._format_meta(speed_txt, eta_txt, total_txt, pct_txt))
+        if speed is not None or eta is not None or total is not None or pct is not None or "quality" in fields:
+            speed_txt = speed if (speed not in (None, "")) else "-"
+            eta_txt = eta if (eta not in (None, "")) else "-"
+            total_txt = total if (total not in (None, "")) else "-"
+            pct_txt = pct if (pct not in (None, "")) else "-"
+            quality_txt = quality if (quality not in (None, "")) else "-"
+            self.meta_var.set(self._format_meta(quality_txt, speed_txt, eta_txt, total_txt, pct_txt))
 
     def _btn1_clicked(self) -> None:
         if self.mode == "normal":

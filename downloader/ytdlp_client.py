@@ -37,6 +37,7 @@ class TaskRuntime:
 
 _logger = logging.getLogger("ytdl")
 _cookies_file: Optional[str] = None
+_max_quality: bool = False
 if not _logger.handlers:
     _logger.setLevel(logging.INFO)
     try:
@@ -60,6 +61,12 @@ def set_cookies_file(path: Optional[str]) -> None:
         if path:
             _logger.warning("Cookies file not found: %s (ignoring)", path)
         _cookies_file = None
+
+
+def set_max_quality(enabled: bool) -> None:
+    global _max_quality
+    _max_quality = bool(enabled)
+    _logger.info("Max quality mode: %s", _max_quality)
 
 
 def fetch_video_info(url: str) -> VideoInfo:
@@ -116,9 +123,12 @@ def download_task(
 ) -> None:
     _logger.info("Download start [%s]: %s", task_id, info.url)
     if has_ffmpeg():
-        fmt = "bestvideo[height=1080]+bestaudio/best[height=1080]/bestvideo+bestaudio/best"
+        if _max_quality:
+            fmt = "bestvideo+bestaudio/best"
+        else:
+            fmt = "bestvideo[height=1080]+bestaudio/best[height=1080]/bestvideo+bestaudio/best"
     else:
-        fmt = "best[height=1080]/best"
+        fmt = "best" if _max_quality else "best[height=1080]/best"
 
     outtmpl = os.path.join(out_dir, "%(title).200s [%(id)s].%(ext)s")
 
@@ -131,6 +141,13 @@ def download_task(
         st = d.get("status")
         filename = d.get("filename") or ""
         tmpfilename = d.get("tmpfilename") or ""
+        fmt_note = d.get("format_note") or ""
+        info_dict = d.get("info_dict") or {}
+        height = info_dict.get("height")
+        width = info_dict.get("width")
+        abr = info_dict.get("abr")
+        vcodec = info_dict.get("vcodec")
+        acodec = info_dict.get("acodec")
 
         if filename:
             runtime.seen_files.add(filename)
@@ -149,6 +166,11 @@ def download_task(
             eta = d.get("eta")
 
             part_kind = infer_part_kind_from_filename(filename, info) if filename else None
+            if not part_kind:
+                if vcodec and vcodec != "none":
+                    part_kind = "video"
+                elif acodec and acodec != "none":
+                    part_kind = "audio"
             if part_kind == "video":
                 stage = "Скачивание видео:"
             elif part_kind == "audio":
@@ -156,13 +178,28 @@ def download_task(
             else:
                 stage = "Скачивание:"
 
+            quality_txt = "-"
+            if part_kind == "video":
+                if fmt_note:
+                    quality_txt = fmt_note
+                elif height:
+                    quality_txt = f"{height}p"
+                elif height and width:
+                    quality_txt = f"{width}x{height}"
+            elif part_kind == "audio":
+                if fmt_note:
+                    quality_txt = fmt_note
+                elif abr:
+                    quality_txt = f"{abr}kbps"
+
             push({
                 "status": stage,
+                "quality": quality_txt,
                 "progress": float(pct) if pct is not None else 0.0,
-                "speed": f"{format_bytes(spd)}/s" if spd else "—",
+                "speed": f"{format_bytes(spd)}/s" if spd else "-",
                 "eta": format_seconds(eta),
-                "total": format_bytes(total_b) if total_b else "—",
-                "pct_text": f"{pct:.1f}%" if pct is not None else "—",
+                "total": format_bytes(total_b) if total_b else "-",
+                "pct_text": f"{pct:.1f}%" if pct is not None else "-",
             })
 
         elif st == "finished":

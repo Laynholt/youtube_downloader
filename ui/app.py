@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 from downloader.ytdlp_client import (
     VideoInfo, TaskRuntime,
     fetch_video_info, download_task,
-    probe_url_kind, expand_playlist, set_cookies_file,
+    probe_url_kind, expand_playlist, set_cookies_file, set_max_quality,
 )
 from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
 from downloader.cleanup import delete_task_files
@@ -75,7 +75,9 @@ class App(tk.Tk):
         if not self.download_dir:
             self.download_dir = str(default_download_dir())
         self.cookies_path = str(cfg.get("cookies_path") or "")
+        self.max_quality = bool(cfg.get("max_quality") or False)
         set_cookies_file(self.cookies_path or None)
+        set_max_quality(self.max_quality)
 
         self._debounce_job: Optional[str] = None
         self._current_preview_tk: Optional[Any] = None
@@ -180,6 +182,11 @@ class App(tk.Tk):
         set_cookies_file(path or None)
         self._update_config(cookies_path=path)
 
+    def _save_max_quality(self, enabled: bool) -> None:
+        self.max_quality = bool(enabled)
+        set_max_quality(self.max_quality)
+        self._update_config(max_quality=self.max_quality)
+
     def _update_config(self, **kwargs: Any) -> None:
         cfg = load_config()
         cfg.update(kwargs)
@@ -202,6 +209,8 @@ class App(tk.Tk):
         style.configure("Muted.TLabel", background=colors["panel"], foreground=colors["muted"])
         style.configure("Bg.TLabel", background=colors["bg"], foreground=colors["text"])
         style.configure("BgBold.TLabel", background=colors["bg"], foreground=colors["text"])
+        style.configure("Panel.TCheckbutton", background=colors["panel"], foreground=colors["text"])
+        style.map("Panel.TCheckbutton", background=[("active", colors["panel_alt"])], foreground=[("active", colors["text"])])
 
         style.configure(
             "TButton",
@@ -393,13 +402,24 @@ class App(tk.Tk):
 
         ttk.Button(frame, text="Выбрать…", style="Accent.TButton", command=choose_file).grid(row=1, column=2, padx=(8, 0), pady=(6, 0))
 
+        max_quality_var = tk.BooleanVar(value=self.max_quality)
+        max_quality_chk = ttk.Checkbutton(
+            frame,
+            text="Максимальное качество (лучшее видео + лучший звук)",
+            variable=max_quality_var,
+            style="Panel.TCheckbutton",
+        )
+        max_quality_chk.grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        add_tooltip(max_quality_chk, "Если включено — берем максимальное доступное качество. Если нет — ограничение 1080p.")
+
         def save_and_close() -> None:
             path = cookies_var.get().strip()
             self._save_cookies_path(path)
+            self._save_max_quality(max_quality_var.get())
             win.destroy()
 
         btns = ttk.Frame(frame, style="Panel.TFrame")
-        btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(12, 0))
 
         ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save_and_close).pack(side="right", padx=(8, 0))
         ttk.Button(btns, text="Отмена", style="Ghost.TButton", command=win.destroy).pack(side="right")
