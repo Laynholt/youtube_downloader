@@ -86,6 +86,10 @@ def _show_dialog(kind: str, title: str, message: str, parent: Optional[tk.Widget
     win.resizable(False, False)
     win.transient(root)
     win.grab_set()
+    try:
+        win.iconbitmap("assets/icon.ico")
+    except Exception:
+        pass
 
     frame = ttk.Frame(win, padding=14, style="Dialog.TFrame")
     frame.pack(fill="both", expand=True)

@@ -86,6 +86,11 @@ class App(tk.Tk):
         self._install_hotkeys()
         install_layout_independent_clipboard_bindings(self)
 
+        try:
+            self.iconbitmap("assets/icon.ico")
+        except Exception:
+            pass
+
         self.after(80, self._poll_queue)
 
     # ---------------- UI ----------------
