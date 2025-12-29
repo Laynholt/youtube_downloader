@@ -54,8 +54,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("YouTube Downloader")
-        self.geometry("980x560")
-        self.minsize(980, 560)
+        self.geometry("980x590")
+        self.minsize(980, 590)
 
         self.msg_q: "queue.Queue[GuiMsg]" = queue.Queue()
         self.tasks: Dict[str, TaskCtx] = {}
