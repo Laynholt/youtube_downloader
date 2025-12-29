@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import textwrap
 import tkinter as tk
 from tkinter import ttk
 from typing import Optional
@@ -17,6 +19,27 @@ _COLORS = {
 
 
 _STYLE_APPLIED = False
+
+
+def _sanitize_message(text: str) -> str:
+    if not text:
+        return ""
+    # Убираем ANSI-escape последовательности (цвета и пр.)
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+    # Стрип лишних пробелов/переводов строки по краям
+    return text.strip()
+
+
+def _wrap_message(text: str, width: int = 90) -> str:
+    if not text:
+        return ""
+    lines = []
+    for block in text.splitlines():
+        if not block.strip():
+            lines.append("")
+            continue
+        lines.append(textwrap.fill(block, width=width))
+    return "\n".join(lines)
 
 
 def _ensure_style() -> None:
@@ -47,6 +70,8 @@ def _ensure_style() -> None:
 
 def _show_dialog(kind: str, title: str, message: str, parent: Optional[tk.Widget]) -> None:
     _ensure_style()
+    clean_msg = _sanitize_message(message)
+    display_msg = _wrap_message(clean_msg, width=90)
 
     root = parent if parent is not None else (tk._default_root or tk.Tk())
     created_root = False
@@ -74,11 +99,29 @@ def _show_dialog(kind: str, title: str, message: str, parent: Optional[tk.Widget
     elif kind == "error":
         msg_color = _COLORS["error"]
 
-    msg_lbl = ttk.Label(frame, text=message, style="Dialog.TLabel", foreground=msg_color, justify="left", anchor="w")
+    msg_lbl = ttk.Label(
+        frame,
+        text=display_msg,
+        style="Dialog.TLabel",
+        foreground=msg_color,
+        justify="left",
+        anchor="w",
+        wraplength=560,
+    )
     msg_lbl.pack(fill="x")
 
-    btn = ttk.Button(frame, text="OK", style="Dialog.TButton", command=win.destroy)
-    btn.pack(pady=(12, 0), anchor="e")
+    btn_row = ttk.Frame(frame, style="Dialog.TFrame")
+    btn_row.pack(fill="x", pady=(12, 0))
+
+    def copy_text() -> None:
+        try:
+            win.clipboard_clear()
+            win.clipboard_append(clean_msg)
+        except Exception:
+            pass
+
+    ttk.Button(btn_row, text="Копировать", style="Dialog.TButton", command=copy_text).pack(side="left")
+    ttk.Button(btn_row, text="OK", style="Dialog.TButton", command=win.destroy).pack(side="right")
 
     win.update_idletasks()
     if parent is not None:

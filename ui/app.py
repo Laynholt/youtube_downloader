@@ -83,6 +83,7 @@ class App(tk.Tk):
 
         self._init_theme()
         self._build_ui()
+        self._install_hotkeys()
         install_layout_independent_clipboard_bindings(self)
 
         self.after(80, self._poll_queue)
@@ -95,8 +96,8 @@ class App(tk.Tk):
 
         ttk.Label(top, text="Ссылка на видео:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         self.url_var = tk.StringVar()
-        self.url_entry = ttk.Entry(top, textvariable=self.url_var, width=92, style="Panel.TEntry")
-        self.url_entry.grid(row=0, column=0, sticky="we", padx=(0, 8))
+        self.url_entry = ttk.Entry(top, textvariable=self.url_var, style="Panel.TEntry")
+        self.url_entry.grid(row=0, column=0, sticky="we", padx=(0, 0))
         self.url_entry.bind("<KeyRelease>", self._on_url_changed)
         self.url_entry.bind("<FocusIn>", self._url_focus_in)
         self.url_entry.bind("<FocusOut>", self._url_focus_out)
@@ -268,6 +269,7 @@ class App(tk.Tk):
             self.url_entry.configure(foreground=self.colors["muted"])
         except Exception:
             pass
+        return None
 
     def _url_focus_in(self, _event: tk.Event) -> None:
         if self.url_var.get() == self.url_placeholder:
@@ -276,10 +278,61 @@ class App(tk.Tk):
                 self.url_entry.configure(foreground=self.colors["text"])
             except Exception:
                 pass
+        return None
 
     def _url_focus_out(self, _event: tk.Event) -> None:
         if not self.url_var.get().strip():
             self._apply_url_placeholder()
+        return None
+
+    def _set_url_text(self, text: str) -> None:
+        if text:
+            self.url_var.set(text)
+            try:
+                self.url_entry.configure(foreground=self.colors["text"])
+            except Exception:
+                pass
+        else:
+            self._apply_url_placeholder()
+
+    # -------------- Hotkeys -------------
+
+    def _install_hotkeys(self) -> None:
+        self.bind_all("<Return>", self._on_enter_pressed, add="+")
+        self.bind_all("<Control-KeyPress>", self._on_ctrl_keypress, add="+")
+
+    def _is_main_or_url_focus(self) -> bool:
+        f = self.focus_get()
+        return f is None or f is self or f is self.url_entry
+
+    def _on_enter_pressed(self, _event: tk.Event) -> Optional[str]:
+        if not self._is_main_or_url_focus():
+            return None
+        self._start_download_clicked()
+        return "break"
+
+    def _on_ctrl_keypress(self, event: tk.Event) -> Optional[str]:
+        if not self._is_main_or_url_focus():
+            return None
+
+        keysym = str(getattr(event, "keysym", "")).lower()
+        keycode = getattr(event, "keycode", None)
+        valid_keys = {"v", "cyrillic_em", "cyrillic_ve"}
+        if keycode in (86,):  # common keycode for V/В on Windows
+            pass
+        elif keysym not in valid_keys:
+            return None
+
+        try:
+            clip = self.clipboard_get().strip()
+        except Exception:
+            clip = ""
+
+        if clip:
+            self._set_url_text(clip)
+            self._on_url_changed(event)
+            return "break"
+        return None
 
     # -------------- URL debounce --------
 
