@@ -37,7 +37,7 @@ class TaskRuntime:
 
 _logger = logging.getLogger("ytdl")
 _cookies_file: Optional[str] = None
-_max_quality: bool = False
+_quality_mode: str = "1080p"  # audio | 360p | 480p | 720p | 1080p | max
 if not _logger.handlers:
     _logger.setLevel(logging.INFO)
     try:
@@ -63,10 +63,44 @@ def set_cookies_file(path: Optional[str]) -> None:
         _cookies_file = None
 
 
-def set_max_quality(enabled: bool) -> None:
-    global _max_quality
-    _max_quality = bool(enabled)
-    _logger.info("Max quality mode: %s", _max_quality)
+def set_quality_mode(mode: str) -> None:
+    global _quality_mode
+    allowed = {"audio", "360p", "480p", "720p", "1080p", "max"}
+    normalized = str(mode).lower()
+    _quality_mode = normalized if normalized in allowed else "1080p"
+    _logger.info("Quality mode: %s", _quality_mode)
+
+
+def _height_from_mode(mode: str) -> Optional[int]:
+    if mode.endswith("p"):
+        try:
+            return int(mode[:-1])
+        except ValueError:
+            return None
+    return None
+
+
+def _build_format_string(ffmpeg_available: Optional[bool] = None) -> str:
+    mode = _quality_mode
+    height = _height_from_mode(mode)
+    ffmpeg_available = has_ffmpeg() if ffmpeg_available is None else ffmpeg_available
+
+    if mode == "audio":
+        return "bestaudio/best"
+
+    if ffmpeg_available:
+        if mode == "max":
+            return "bestvideo+bestaudio/best"
+        if height:
+            return f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best[height<={height}]"
+        return "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+
+    # без ffmpeg работаем с лучшим единым файлом
+    if mode == "max":
+        return "best"
+    if height:
+        return f"best[height<={height}]/best"
+    return "best[height<=1080]/best"
 
 
 def fetch_video_info(url: str) -> VideoInfo:
@@ -122,13 +156,8 @@ def download_task(
     update: UpdateFn,
 ) -> None:
     _logger.info("Download start [%s]: %s", task_id, info.url)
-    if has_ffmpeg():
-        if _max_quality:
-            fmt = "bestvideo+bestaudio/best"
-        else:
-            fmt = "bestvideo[height=1080]+bestaudio/best[height=1080]/bestvideo+bestaudio/best"
-    else:
-        fmt = "best" if _max_quality else "best[height=1080]/best"
+    ffmpeg_available = has_ffmpeg()
+    fmt = _build_format_string(ffmpeg_available)
 
     outtmpl = os.path.join(out_dir, "%(title).200s [%(id)s].%(ext)s")
 
@@ -234,8 +263,8 @@ def download_task(
     if _cookies_file:
         ydl_opts["cookies"] = _cookies_file
 
-    if not has_ffmpeg():
-        msg = "ffmpeg не найден: качаю единый файл (best)"
+    if not ffmpeg_available and _quality_mode != "audio":
+        msg = "ffmpeg не найден: качаю единый файл (без склейки bestvideo+bestaudio)"
         push({"status": msg})
         _logger.warning(msg)
 

@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 from downloader.ytdlp_client import (
     VideoInfo, TaskRuntime,
     fetch_video_info, download_task,
-    probe_url_kind, expand_playlist, set_cookies_file, set_max_quality,
+    probe_url_kind, expand_playlist, set_cookies_file, set_quality_mode,
 )
 from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
 from downloader.cleanup import delete_task_files
@@ -75,9 +75,9 @@ class App(tk.Tk):
         if not self.download_dir:
             self.download_dir = str(default_download_dir())
         self.cookies_path = str(cfg.get("cookies_path") or "")
-        self.max_quality = bool(cfg.get("max_quality") or False)
+        self.quality_mode = self._pick_quality_mode(cfg)
         set_cookies_file(self.cookies_path or None)
-        set_max_quality(self.max_quality)
+        set_quality_mode(self.quality_mode)
 
         self._debounce_job: Optional[str] = None
         self._current_preview_tk: Optional[Any] = None
@@ -182,10 +182,26 @@ class App(tk.Tk):
         set_cookies_file(path or None)
         self._update_config(cookies_path=path)
 
-    def _save_max_quality(self, enabled: bool) -> None:
-        self.max_quality = bool(enabled)
-        set_max_quality(self.max_quality)
-        self._update_config(max_quality=self.max_quality)
+    def _save_quality_mode(self, mode: str) -> None:
+        normalized = self._normalize_quality_mode(mode) or "1080p"
+        self.quality_mode = normalized
+        set_quality_mode(self.quality_mode)
+        self._update_config(quality=self.quality_mode)
+
+    @staticmethod
+    def _normalize_quality_mode(mode: Any) -> Optional[str]:
+        allowed = {"audio", "360p", "480p", "720p", "1080p", "max"}
+        mode_str = str(mode).lower() if mode is not None else ""
+        return mode_str if mode_str in allowed else None
+
+    def _pick_quality_mode(self, cfg: Dict[str, Any]) -> str:
+        saved = self._normalize_quality_mode(cfg.get("quality"))
+        if saved:
+            return saved
+        legacy_max_quality = cfg.get("max_quality")
+        if legacy_max_quality is not None:
+            return "max" if bool(legacy_max_quality) else "1080p"
+        return "1080p"
 
     def _update_config(self, **kwargs: Any) -> None:
         cfg = load_config()
@@ -253,6 +269,30 @@ class App(tk.Tk):
             darkcolor=colors["panel_alt"],
             padding=4,
         )
+        style.configure(
+            "Panel.TCombobox",
+            fieldbackground=colors["panel_alt"],
+            background=colors["panel_alt"],
+            foreground=colors["text"],
+            bordercolor=colors["panel_alt"],
+            lightcolor=colors["panel_alt"],
+            darkcolor=colors["panel_alt"],
+            arrowcolor=colors["text"],
+            selectbackground=colors["panel_alt"],
+            selectforeground=colors["text"],
+        )
+        style.map(
+            "Panel.TCombobox",
+            fieldbackground=[("readonly", colors["panel_alt"])],
+            foreground=[("readonly", colors["text"])],
+        )
+
+        # цвет выпадающего списка combobox (listbox)
+        self.option_add("*TCombobox*Listbox.background", colors["panel_alt"])
+        self.option_add("*TCombobox*Listbox.foreground", colors["text"])
+        self.option_add("*TCombobox*Listbox.selectBackground", colors["accent"])
+        self.option_add("*TCombobox*Listbox.selectForeground", colors["bg"])
+        self.option_add("*TCombobox*Listbox.borderWidth", 0)
 
         style.configure(
             "Dark.TSeparator",
@@ -402,24 +442,38 @@ class App(tk.Tk):
 
         ttk.Button(frame, text="Выбрать…", style="Accent.TButton", command=choose_file).grid(row=1, column=2, padx=(8, 0), pady=(6, 0))
 
-        max_quality_var = tk.BooleanVar(value=self.max_quality)
-        max_quality_chk = ttk.Checkbutton(
+        ttk.Label(frame, text="Качество загрузки:", style="PanelBold.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 0))
+        quality_choices = [
+            ("audio", "Только аудио (лучшее)"),
+            ("360p", "Видео 360p"),
+            ("480p", "Видео 480p"),
+            ("720p", "Видео 720p"),
+            ("1080p", "Видео 1080p"),
+            ("max", "Максимально доступное (лучшее видео + звук)"),
+        ]
+        label_by_code = {code: label for code, label in quality_choices}
+        code_by_label = {label: code for code, label in quality_choices}
+        quality_var = tk.StringVar(value=label_by_code.get(self.quality_mode, quality_choices[4][1]))
+        quality_cb = ttk.Combobox(
             frame,
-            text="Максимальное качество (лучшее видео + лучший звук)",
-            variable=max_quality_var,
-            style="Panel.TCheckbutton",
+            textvariable=quality_var,
+            values=[label for _, label in quality_choices],
+            state="readonly",
+            style="Panel.TCombobox",
+            width=40,
         )
-        max_quality_chk.grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
-        add_tooltip(max_quality_chk, "Если включено — берем максимальное доступное качество. Если нет — ограничение 1080p.")
+        quality_cb.grid(row=3, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        add_tooltip(quality_cb, "Выберите лучшее доступное качество в нужной категории: аудио или целевое разрешение.")
 
         def save_and_close() -> None:
             path = cookies_var.get().strip()
             self._save_cookies_path(path)
-            self._save_max_quality(max_quality_var.get())
+            selected_code = code_by_label.get(quality_var.get(), "1080p")
+            self._save_quality_mode(selected_code)
             win.destroy()
 
         btns = ttk.Frame(frame, style="Panel.TFrame")
-        btns.grid(row=3, column=0, columnspan=3, sticky="we", pady=(12, 0))
+        btns.grid(row=4, column=0, columnspan=3, sticky="we", pady=(12, 0))
         ttk.Label(btns, text=f"Версия: {get_app_version()}  |  Автор: laynholt", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save_and_close).grid(row=0, column=2, sticky="e", padx=(8, 0))
         ttk.Button(btns, text="Отмена", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, sticky="e")
