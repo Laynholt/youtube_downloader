@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
+APP_VERSION = "1.0"
+
 from .paths import config_path, stuff_dir
 
 
@@ -23,3 +25,7 @@ def save_config(data: Dict[str, Any]) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(p)
+
+
+def get_app_version() -> str:
+    return APP_VERSION

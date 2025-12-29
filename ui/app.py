@@ -15,7 +15,7 @@ from downloader.ytdlp_client import (
 from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
 from downloader.cleanup import delete_task_files
 
-from utils.config import load_config, save_config
+from utils.config import load_config, save_config, get_app_version
 from utils.paths import default_download_dir
 from ui.dialogs import show_error, show_info, show_warning
 from ui.tooltips import add_tooltip
@@ -419,10 +419,11 @@ class App(tk.Tk):
             win.destroy()
 
         btns = ttk.Frame(frame, style="Panel.TFrame")
-        btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(12, 0))
-
-        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save_and_close).pack(side="right", padx=(8, 0))
-        ttk.Button(btns, text="Отмена", style="Ghost.TButton", command=win.destroy).pack(side="right")
+        btns.grid(row=3, column=0, columnspan=3, sticky="we", pady=(12, 0))
+        ttk.Label(btns, text=f"Версия: {get_app_version()}  |  Автор: laynholt", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save_and_close).grid(row=0, column=2, sticky="e", padx=(8, 0))
+        ttk.Button(btns, text="Отмена", style="Ghost.TButton", command=win.destroy).grid(row=0, column=1, sticky="e")
+        btns.grid_columnconfigure(0, weight=1)
 
         frame.grid_columnconfigure(0, weight=1)
 
