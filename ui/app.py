@@ -24,14 +24,23 @@ GuiMsg = Tuple[str, str, Dict[str, Any]]  # ("task_update", task_id, fields)
 
 
 class TaskCtx:
-    def __init__(self, *, task_id: str, info: VideoInfo, out_dir: str) -> None:
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        info: VideoInfo,
+        out_dir: str,
+        playlist_id: Optional[str] = None,
+    ) -> None:
         self.task_id = task_id
         self.info = info
         self.out_dir = out_dir
+        self.playlist_id = playlist_id
 
         self.pause_flag = threading.Event()
         self.cancel_flag = threading.Event()
         self.soft_cancelled = False
+        self.finished_reported = False
 
         self.runtime = TaskRuntime(pause_flag=self.pause_flag, cancel_flag=self.cancel_flag)
         self.worker: Optional[threading.Thread] = None
@@ -47,6 +56,7 @@ class App(tk.Tk):
 
         self.msg_q: "queue.Queue[GuiMsg]" = queue.Queue()
         self.tasks: Dict[str, TaskCtx] = {}
+        self._playlist_batches: Dict[str, Dict[str, Any]] = {}
 
         cfg = load_config()
         self.download_dir = str(cfg.get("download_dir") or os.path.expanduser("~/Downloads"))
@@ -98,7 +108,8 @@ class App(tk.Tk):
         action = ttk.Frame(self, padding=(12, 0, 12, 12))
         action.pack(fill="x")
         ttk.Button(action, text="Скачать", command=self._start_download_clicked).pack(side="left")
-        ttk.Label(action, text="(Можно добавлять несколько ссылок — загрузки параллельно)").pack(side="left", padx=(12, 0))
+        ttk.Button(action, text="Очистить очередь", command=self._clear_pending_batches).pack(side="left", padx=(8, 0))
+        ttk.Label(action, text="(Можно добавлять несколько ссылок - загрузки параллельно)").pack(side="left", padx=(12, 0))
 
         ttk.Separator(self).pack(fill="x", padx=12, pady=(0, 8))
         ttk.Label(self, text="Очередь загрузок:", padding=(12, 0, 12, 6), font=("TkDefaultFont", 10, "bold")).pack(fill="x")
@@ -115,6 +126,13 @@ class App(tk.Tk):
         cfg = load_config()
         cfg["download_dir"] = path
         save_config(cfg)
+
+    def _clear_pending_batches(self) -> None:
+        """
+        Удаляет все ожидающие пачки плейлистов (оставляя текущие активные загрузки).
+        """
+        self._playlist_batches.clear()
+        messagebox.showinfo("Очередь", "Ожидающие загрузки видео отчищены.\nТекущие загрузки незатронуты.")
 
     # -------------- URL debounce --------
 
@@ -182,9 +200,15 @@ class App(tk.Tk):
             self._save_download_dir(d)
 
     # -------------- Download start ------
-    def _create_task_from_videoinfo(self, info: VideoInfo, out_dir: str) -> None:
+    def _create_task_from_videoinfo(
+        self,
+        info: VideoInfo,
+        out_dir: str,
+        *,
+        playlist_id: Optional[str] = None,
+    ) -> str:
         task_id = os.urandom(6).hex()
-        ctx = TaskCtx(task_id=task_id, info=info, out_dir=out_dir)
+        ctx = TaskCtx(task_id=task_id, info=info, out_dir=out_dir, playlist_id=playlist_id)
         self.tasks[task_id] = ctx
 
         def on_pause() -> None:
@@ -242,6 +266,57 @@ class App(tk.Tk):
         t = threading.Thread(target=dl_worker, daemon=True)
         ctx.worker = t
         t.start()
+        return task_id
+
+    def _enqueue_videos_batched(
+        self,
+        videos: list[VideoInfo],
+        *,
+        batch_size: int = 5,
+        delay_ms: int = 1200,
+        out_dir: Optional[str] = None,
+    ) -> None:
+        """
+        Добавляем элементы плейлиста небольшими пачками, следующая пачка идёт только после завершения предыдущей.
+        """
+        if not videos:
+            return
+
+        playlist_id = os.urandom(5).hex()
+        self._playlist_batches[playlist_id] = {
+            "videos": videos,
+            "pos": 0,
+            "active": set(),
+            "batch_size": batch_size,
+            "delay_ms": delay_ms,
+            "out_dir": out_dir or self.download_dir,
+        }
+        self._start_playlist_batch(playlist_id)
+
+    def _start_playlist_batch(self, playlist_id: str) -> None:
+        batch = self._playlist_batches.get(playlist_id)
+        if not batch:
+            return
+
+        start = batch["pos"]
+        videos = batch["videos"]
+        if start >= len(videos):
+            self._playlist_batches.pop(playlist_id, None)
+            return
+
+        chunk = videos[start:start + batch.get("batch_size", 5)]
+        batch["pos"] = start + len(chunk)
+
+        for vi in chunk:
+            if isinstance(vi, VideoInfo):
+                tid = self._create_task_from_videoinfo(vi, batch["out_dir"], playlist_id=playlist_id)
+                batch["active"].add(tid)
+
+        if not batch["active"]:
+            if batch["pos"] >= len(batch["videos"]):
+                self._playlist_batches.pop(playlist_id, None)
+            else:
+                self.after(batch.get("delay_ms", 1200), lambda: self._start_playlist_batch(playlist_id))
 
 
     def _start_download_clicked(self) -> None:
@@ -351,6 +426,7 @@ class App(tk.Tk):
         ctx = self.tasks.pop(task_id, None)
         if not ctx:
             return
+        self._on_task_finished(task_id, ctx)
         if ctx.row is not None:
             try:
                 ctx.row.destroy()
@@ -394,9 +470,7 @@ class App(tk.Tk):
                         videos = fields["enqueue_many"]
                         # Можно показать инфо (не обязательно)
                         # pl_title = str(fields.get("playlist_title") or "Плейлист")
-                        for vi in videos:
-                            if isinstance(vi, VideoInfo):
-                                self._create_task_from_videoinfo(vi, self.download_dir)
+                        self._enqueue_videos_batched(videos, out_dir=self.download_dir)
                         continue
 
 
@@ -418,11 +492,41 @@ class App(tk.Tk):
                 status = str(fields.get("status") or "")
                 if status == "Готово":
                     ctx.row.set_mode("done")
+                    self._on_task_finished(task_id)
                 elif status.startswith("Ошибка"):
                     if not ctx.soft_cancelled:
                         ctx.row.set_mode("disabled")
+                    self._on_task_finished(task_id)
+                elif status == "Отменено":
+                    self._on_task_finished(task_id)
 
         except queue.Empty:
             pass
         finally:
             self.after(80, self._poll_queue)
+
+    def _on_task_finished(self, task_id: str, ctx: Optional[TaskCtx] = None) -> None:
+        ctx = ctx or self.tasks.get(task_id)
+        if not ctx or ctx.finished_reported:
+            return
+
+        ctx.finished_reported = True
+
+        playlist_id = ctx.playlist_id
+        if not playlist_id:
+            return
+
+        batch = self._playlist_batches.get(playlist_id)
+        if not batch:
+            return
+
+        batch["active"].discard(task_id)
+        if batch["active"]:
+            return
+
+        if batch["pos"] >= len(batch["videos"]):
+            self._playlist_batches.pop(playlist_id, None)
+            return
+
+        delay_ms = batch.get("delay_ms", 1200)
+        self.after(delay_ms, lambda: self._start_playlist_batch(playlist_id))
