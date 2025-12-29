@@ -3,7 +3,8 @@ from __future__ import annotations
 import importlib.util
 import sys
 import tkinter as tk
-from tkinter import messagebox
+
+from ui.dialogs import show_error
 
 
 def _missing_deps() -> list[str]:
@@ -19,12 +20,13 @@ _missing = _missing_deps()
 if _missing:
     root = tk.Tk()
     root.withdraw()
-    messagebox.showerror(
+    show_error(
         "Не хватает зависимостей",
         "Не установлены зависимости: " + ", ".join(_missing) + "\n\n"
         "Установите:\n"
         "  pip install yt-dlp Pillow\n\n"
         "И перезапустите приложение.",
+        parent=root,
     )
     root.destroy()
     raise SystemExit(1)

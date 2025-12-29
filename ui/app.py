@@ -4,7 +4,7 @@ import os
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 from typing import Any, Dict, Optional, Tuple
 
 from downloader.ytdlp_client import (
@@ -16,6 +16,9 @@ from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
 from downloader.cleanup import delete_task_files
 
 from utils.config import load_config, save_config
+from utils.paths import default_download_dir
+from ui.dialogs import show_error, show_info, show_warning
+from ui.tooltips import add_tooltip
 from utils.clipboard import install_layout_independent_clipboard_bindings
 
 from .widgets import ScrollableFrame, TaskRow
@@ -68,14 +71,15 @@ class App(tk.Tk):
         }
 
         cfg = load_config()
-        self.download_dir = str(cfg.get("download_dir") or os.path.expanduser("~/Downloads"))
+        self.download_dir = str(cfg.get("download_dir") or default_download_dir())
         if not self.download_dir:
-            self.download_dir = os.path.expanduser("~/Downloads")
+            self.download_dir = str(default_download_dir())
 
         self._debounce_job: Optional[str] = None
         self._current_preview_tk: Optional[Any] = None
 
         self.default_title = "Вставьте ссылку на видео или плейлист."
+        self.url_placeholder = "Ссылка на видео или плейлист"
 
         self._init_theme()
         self._build_ui()
@@ -92,8 +96,12 @@ class App(tk.Tk):
         ttk.Label(top, text="Ссылка на видео:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         self.url_var = tk.StringVar()
         self.url_entry = ttk.Entry(top, textvariable=self.url_var, width=92, style="Panel.TEntry")
-        self.url_entry.grid(row=0, column=1, sticky="we", padx=(8, 8))
+        self.url_entry.grid(row=0, column=0, sticky="we", padx=(0, 8))
         self.url_entry.bind("<KeyRelease>", self._on_url_changed)
+        self.url_entry.bind("<FocusIn>", self._url_focus_in)
+        self.url_entry.bind("<FocusOut>", self._url_focus_out)
+        self._apply_url_placeholder()
+        add_tooltip(self.url_entry, "Вставьте ссылку на видео или плейлист, затем нажмите Enter или «Скачать».")
 
         info = ttk.Frame(self, padding=(12, 0, 12, 12), style="Panel.TFrame")
         info.pack(fill="x")
@@ -111,14 +119,20 @@ class App(tk.Tk):
         self.folder_var = tk.StringVar(value=self.download_dir)
         folder_row = ttk.Frame(info, style="Panel.TFrame")
         folder_row.grid(row=1, column=1, sticky="we", pady=(8, 0))
-        ttk.Label(folder_row, text="Папка:", style="Panel.TLabel").pack(side="left")
+        ttk.Label(folder_row, text="Загрузки:", style="Panel.TLabel").pack(side="left")
         ttk.Entry(folder_row, textvariable=self.folder_var, style="Panel.TEntry").pack(side="left", fill="x", expand=True, padx=(8, 8))
-        ttk.Button(folder_row, text="Выбрать…", command=self._choose_folder, style="Accent.TButton").pack(side="left")
+        btn_choose = ttk.Button(folder_row, text="Выбрать…", command=self._choose_folder, style="Accent.TButton")
+        btn_choose.pack(side="left")
+        add_tooltip(btn_choose, "Выбрать папку, куда сохранять файлы.")
 
         action = ttk.Frame(self, padding=(12, 0, 12, 12), style="Panel.TFrame")
         action.pack(fill="x")
-        ttk.Button(action, text="Скачать", command=self._start_download_clicked, style="Accent.TButton").pack(side="left")
-        ttk.Button(action, text="Очистить очередь", command=self._clear_pending_batches, style="Ghost.TButton").pack(side="left", padx=(8, 0))
+        btn_download = ttk.Button(action, text="Скачать", command=self._start_download_clicked, style="Accent.TButton")
+        btn_download.pack(side="left")
+        add_tooltip(btn_download, "Добавить ссылку (или плейлист) в очередь.")
+        btn_clear = ttk.Button(action, text="Очистить очередь", command=self._clear_pending_batches, style="Ghost.TButton")
+        btn_clear.pack(side="left", padx=(8, 0))
+        add_tooltip(btn_clear, "Удалить все ожидающие пачки плейлистов.")
         ttk.Label(action, text="(Можно добавлять несколько ссылок - загрузки параллельно)", style="Muted.TLabel").pack(side="left", padx=(12, 0))
 
         ttk.Separator(self, style="Dark.TSeparator").pack(fill="x", padx=12, pady=(0, 8))
@@ -138,7 +152,7 @@ class App(tk.Tk):
         self.scroll.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         self.scroll.set_background(self.colors["bg"])
 
-        top.grid_columnconfigure(1, weight=1)
+        top.grid_columnconfigure(0, weight=1)
         info.grid_columnconfigure(1, weight=1)
 
     # -------------- Config --------------
@@ -244,7 +258,28 @@ class App(tk.Tk):
         Удаляет все ожидающие пачки плейлистов (оставляя текущие активные загрузки).
         """
         self._playlist_batches.clear()
-        messagebox.showinfo("Очередь", "Ожидающие загрузки видео очищены.\nТекущие загрузки незатронуты.")
+        show_info("Очередь", "Ожидающие загрузки видео очищены.\nТекущие загрузки незатронуты.", parent=self)
+
+    # -------------- URL helpers ---------
+
+    def _apply_url_placeholder(self) -> None:
+        self.url_var.set(self.url_placeholder)
+        try:
+            self.url_entry.configure(foreground=self.colors["muted"])
+        except Exception:
+            pass
+
+    def _url_focus_in(self, _event: tk.Event) -> None:
+        if self.url_var.get() == self.url_placeholder:
+            self.url_var.set("")
+            try:
+                self.url_entry.configure(foreground=self.colors["text"])
+            except Exception:
+                pass
+
+    def _url_focus_out(self, _event: tk.Event) -> None:
+        if not self.url_var.get().strip():
+            self._apply_url_placeholder()
 
     # -------------- URL debounce --------
 
@@ -259,6 +294,8 @@ class App(tk.Tk):
     def _auto_fetch_if_possible(self) -> None:
         self._debounce_job = None
         url = self.url_var.get().strip()
+        if url == self.url_placeholder:
+            return
         if not url:
             return
         if "youtu" not in url and "youtube" not in url:
@@ -270,7 +307,7 @@ class App(tk.Tk):
     def _fetch_info_clicked(self) -> None:
         url = self.url_var.get().strip()
         if not url:
-            messagebox.showwarning("Ссылка", "Вставьте ссылку на видео.")
+            show_warning("Ссылка", "Вставьте ссылку на видео.", parent=self)
             return
 
         self.title_var.set("Получаю информацию…")
@@ -434,7 +471,10 @@ class App(tk.Tk):
     def _start_download_clicked(self) -> None:
         url = self.url_var.get().strip()
         if not url:
-            messagebox.showwarning("Ссылка", "Вставьте ссылку на видео или плейлист.")
+            show_warning("Ссылка", "Вставьте ссылку на видео или плейлист.", parent=self)
+            return
+        if url == self.url_placeholder:
+            show_warning("Ссылка", "Вставьте ссылку на видео или плейлист.", parent=self)
             return
 
         out_dir = (self.folder_var.get().strip() or self.download_dir).strip()
@@ -523,11 +563,12 @@ class App(tk.Tk):
             def ui_remove() -> None:
                 self._close(task_id)
                 if errs:
-                    messagebox.showwarning(
+                    show_warning(
                         "Удаление файлов",
                         f"Удалено файлов: {removed}\n\nНе удалось удалить (возможно заняты):\n"
                         + "\n".join(errs[:10])
                         + ("\n…" if len(errs) > 10 else ""),
+                        parent=self,
                     )
 
             self.after(0, ui_remove)
@@ -571,7 +612,7 @@ class App(tk.Tk):
                 
                 if task_id == "__ui__":
                     if "ui_error" in fields:
-                        messagebox.showerror("Ошибка", str(fields["ui_error"]))
+                        show_error("Ошибка", str(fields["ui_error"]), parent=self)
                         continue
 
                     if "enqueue_one" in fields and isinstance(fields["enqueue_one"], VideoInfo):

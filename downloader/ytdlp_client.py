@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Set
@@ -13,6 +14,7 @@ from downloader.formatting import (
     infer_part_kind_from_filename,
     wait_if_paused_or_cancelled,
 )
+from utils.paths import log_path
 
 UpdateFn = Callable[[str, Dict[str, Any]], None]
 
@@ -33,7 +35,23 @@ class TaskRuntime:
     seen_files: Set[str] = field(default_factory=set)
 
 
+_logger = logging.getLogger("ytdl")
+if not _logger.handlers:
+    _logger.setLevel(logging.INFO)
+    try:
+        lp = log_path()
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(lp, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        _logger.addHandler(fh)
+    except Exception:
+        sh = logging.StreamHandler()
+        sh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        _logger.addHandler(sh)
+
+
 def fetch_video_info(url: str) -> VideoInfo:
+    _logger.info("Fetch info: %s", url)
     ydl_opts: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
@@ -47,6 +65,7 @@ def fetch_video_info(url: str) -> VideoInfo:
     title = info.get("title") or "—"
     thumb = info.get("thumbnail")
     webpage = info.get("webpage_url") or url
+    _logger.info("Fetched title: %s", title)
 
     fmt_kind: Dict[str, str] = {}
     for f in info.get("formats", []) or []:
@@ -81,6 +100,7 @@ def download_task(
     runtime: TaskRuntime,
     update: UpdateFn,
 ) -> None:
+    _logger.info("Download start [%s]: %s", task_id, info.url)
     if has_ffmpeg():
         fmt = "bestvideo[height=1080]+bestaudio/best[height=1080]/bestvideo+bestaudio/best"
     else:
@@ -162,7 +182,9 @@ def download_task(
     }
 
     if not has_ffmpeg():
-        push({"status": "ffmpeg не найден: качаю единый файл (best)"})
+        msg = "ffmpeg не найден: качаю единый файл (best)"
+        push({"status": msg})
+        _logger.warning(msg)
 
     try:
         push({"status": "Подготовка", "progress": 0.0})
@@ -171,20 +193,25 @@ def download_task(
 
         if runtime.cancel_flag.is_set():
             push({"status": "Отменено", "progress": 0.0})
+            _logger.info("Download cancelled [%s]", task_id)
         else:
             push({"status": "Готово", "progress": 100.0, "speed": "", "eta": "", "total": "", "pct_text": ""})
+            _logger.info("Download done [%s]", task_id)
 
     except Exception as e:
         if "cancelled" in str(e).lower() or runtime.cancel_flag.is_set():
             push({"status": "Отменено", "progress": 0.0})
+            _logger.info("Download cancelled after exception [%s]: %s", task_id, e)
         else:
             push({"status": f"Ошибка: {e}"})
+            _logger.error("Download failed [%s]: %s", task_id, e)
 
 
 def probe_url_kind(url: str) -> tuple[str, dict]:
     """
     Возвращает ("playlist"|"video"|"unknown", raw_info_dict)
     """
+    _logger.info("Probe url: %s", url)
     ydl_opts: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
@@ -242,8 +269,9 @@ def _to_webpage_url(entry: dict) -> Optional[str]:
 def expand_playlist(url: str) -> tuple[str, list[VideoInfo]]:
     """
     Возвращает (playlist_title, [VideoInfo...]) для добавления в очередь.
-    Каждый элемент — отдельное видео.
+    Каждый элемент - отдельное видео.
     """
+    _logger.info("Expand playlist: %s", url)
     ydl_opts: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
@@ -276,4 +304,5 @@ def expand_playlist(url: str) -> tuple[str, list[VideoInfo]]:
             )
         )
 
+    _logger.info("Playlist expanded: %s | %d entries", title, len(items))
     return title, items

@@ -16,3 +16,11 @@ def stuff_dir() -> Path:
 
 def config_path() -> Path:
     return stuff_dir() / "config.ini"
+
+
+def log_path() -> Path:
+    return stuff_dir() / "ytdl.log"
+
+
+def default_download_dir() -> Path:
+    return Path.home() / "Downloads"
