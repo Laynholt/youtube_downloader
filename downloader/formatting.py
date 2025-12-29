@@ -5,6 +5,8 @@ import shutil
 import time
 from typing import Optional, TYPE_CHECKING, Any
 
+from utils.ffmpeg_installer import find_ffmpeg
+
 if TYPE_CHECKING:
     from downloader.ytdlp_client import VideoInfo  # только для type-check, не в runtime
 
@@ -12,7 +14,7 @@ _FMTID_RE = re.compile(r"\.f([0-9A-Za-z_-]+)\.")  # ... .f137.mp4 / ... .f251.we
 
 
 def has_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return find_ffmpeg() is not None
 
 
 def format_bytes(n: Optional[float]) -> str:

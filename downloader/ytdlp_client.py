@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
 
 import yt_dlp
@@ -10,10 +11,10 @@ import yt_dlp
 from downloader.formatting import (
     format_bytes,
     format_seconds,
-    has_ffmpeg,
     infer_part_kind_from_filename,
     wait_if_paused_or_cancelled,
 )
+from utils.ffmpeg_installer import find_ffmpeg
 from utils.paths import log_path
 
 UpdateFn = Callable[[str, Dict[str, Any]], None]
@@ -83,7 +84,7 @@ def _height_from_mode(mode: str) -> Optional[int]:
 def _build_format_string(ffmpeg_available: Optional[bool] = None) -> str:
     mode = _quality_mode
     height = _height_from_mode(mode)
-    ffmpeg_available = has_ffmpeg() if ffmpeg_available is None else ffmpeg_available
+    ffmpeg_available = bool(ffmpeg_available)
 
     if mode == "audio":
         return "bestaudio/best"
@@ -156,7 +157,8 @@ def download_task(
     update: UpdateFn,
 ) -> None:
     _logger.info("Download start [%s]: %s", task_id, info.url)
-    ffmpeg_available = has_ffmpeg()
+    ffmpeg_path = find_ffmpeg()
+    ffmpeg_available = ffmpeg_path is not None
     fmt = _build_format_string(ffmpeg_available)
 
     outtmpl = os.path.join(out_dir, "%(title).200s [%(id)s].%(ext)s")
@@ -260,6 +262,8 @@ def download_task(
         "progress_hooks": [progress_hook],
         "postprocessor_hooks": [postprocessor_hook],
     }
+    if ffmpeg_path:
+        ydl_opts["ffmpeg_location"] = str(Path(ffmpeg_path).parent)
     if _cookies_file:
         ydl_opts["cookies"] = _cookies_file
 

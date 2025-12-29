@@ -148,3 +148,66 @@ def show_warning(title: str, message: str, parent: Optional[tk.Widget] = None) -
 
 def show_error(title: str, message: str, parent: Optional[tk.Widget] = None) -> None:
     _show_dialog("error", title, message, parent)
+
+
+def ask_yes_no(title: str, message: str, parent: Optional[tk.Widget] = None, *, yes: str = "Да", no: str = "Нет") -> bool:
+    """
+    Показывает диалог с кнопками Да/Нет, возвращает True/False.
+    """
+    _ensure_style()
+    clean_msg = _sanitize_message(message)
+    display_msg = _wrap_message(clean_msg, width=90)
+
+    root = parent if parent is not None else (tk._default_root or tk.Tk())
+    created_root = False
+    if root is None:
+        root = tk.Tk()
+        root.withdraw()
+        created_root = True
+
+    win = tk.Toplevel(root)
+    win.title(title)
+    win.configure(bg=_COLORS["panel"])
+    win.resizable(False, False)
+    win.transient(root)
+    win.grab_set()
+    try:
+        win.iconbitmap("assets/icon.ico")
+    except Exception:
+        pass
+
+    frame = ttk.Frame(win, padding=14, style="Dialog.TFrame")
+    frame.pack(fill="both", expand=True)
+
+    ttk.Label(frame, text=title, style="Dialog.Title.TLabel", anchor="w").pack(fill="x", pady=(0, 6))
+    ttk.Label(
+        frame,
+        text=display_msg,
+        style="Dialog.TLabel",
+        justify="left",
+        anchor="w",
+        wraplength=560,
+    ).pack(fill="x")
+
+    btn_row = ttk.Frame(frame, style="Dialog.TFrame")
+    btn_row.pack(fill="x", pady=(12, 0))
+
+    result = tk.BooleanVar(value=False)
+
+    def choose(value: bool) -> None:
+        result.set(value)
+        win.destroy()
+
+    ttk.Button(btn_row, text=yes, style="Dialog.TButton", command=lambda: choose(True)).pack(side="right", padx=(8, 0))
+    ttk.Button(btn_row, text=no, style="Dialog.TButton", command=lambda: choose(False)).pack(side="right")
+
+    win.update_idletasks()
+    if parent is not None:
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - win.winfo_width()) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - win.winfo_height()) // 2)
+        win.geometry(f"+{x}+{y}")
+
+    win.wait_variable(result)
+    if created_root:
+        root.destroy()
+    return bool(result.get())

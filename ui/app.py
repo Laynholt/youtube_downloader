@@ -17,9 +17,10 @@ from downloader.cleanup import delete_task_files
 
 from utils.config import load_config, save_config, get_app_version
 from utils.paths import default_download_dir
-from ui.dialogs import show_error, show_info, show_warning
+from ui.dialogs import show_error, show_info, show_warning, ask_yes_no
 from ui.tooltips import add_tooltip
 from utils.clipboard import install_layout_independent_clipboard_bindings
+from utils.ffmpeg_installer import find_ffmpeg, install_ffmpeg
 
 from .widgets import ScrollableFrame, TaskRow
 
@@ -96,6 +97,7 @@ class App(tk.Tk):
             pass
 
         self.after(80, self._poll_queue)
+        self.after(600, self._check_ffmpeg_presence)
 
     # ---------------- UI ----------------
 
@@ -207,6 +209,39 @@ class App(tk.Tk):
         cfg = load_config()
         cfg.update(kwargs)
         save_config(cfg)
+
+    # -------------- Startup checks -----
+
+    def _check_ffmpeg_presence(self) -> None:
+        if getattr(self, "_ffmpeg_check_done", False):
+            return
+        self._ffmpeg_check_done = True
+
+        if find_ffmpeg():
+            return
+
+        consent = ask_yes_no(
+            "FFmpeg не найден",
+            "ffmpeg нужен для склейки лучшего видео+аудио и качества выше 1080p.\n\n"
+            "Установить автоматически? (скачает ~80-90 МБ с gyan.dev)",
+            parent=self,
+        )
+        if not consent:
+            show_warning(
+                "FFmpeg не установлен",
+                "Без ffmpeg загрузки будут в виде одного файла (best), склейка bestvideo+bestaudio недоступна.",
+                parent=self,
+            )
+            return
+
+        def worker() -> None:
+            ok, msg, _ = install_ffmpeg()
+            if ok:
+                self.msg_q.put(("task_update", "__ui__", {"ui_info": msg}))
+            else:
+                self.msg_q.put(("task_update", "__ui__", {"ui_error": msg}))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _init_theme(self) -> None:
         colors = self.colors
@@ -820,8 +855,16 @@ class App(tk.Tk):
                     continue
                 
                 if task_id == "__ui__":
+                    if "ui_info" in fields:
+                        show_info("Информация", str(fields["ui_info"]), parent=self)
+                        continue
+
                     if "ui_error" in fields:
                         show_error("Ошибка", str(fields["ui_error"]), parent=self)
+                        continue
+
+                    if "ui_warning" in fields:
+                        show_warning("Предупреждение", str(fields["ui_warning"]), parent=self)
                         continue
 
                     if "enqueue_one" in fields and isinstance(fields["enqueue_one"], VideoInfo):
