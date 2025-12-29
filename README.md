@@ -17,6 +17,24 @@
 - Темная тема, собственные диалоги и превью.
 - Настройка папки загрузки и cookies; режим максимального качества.
 
+## Установка
+
+```bash
+git clone https://github.com/Laynholt/youtube_downloader.git
+```
+
+```bash
+cd youtube_downloader
+```
+
+```bash
+uv sync
+```
+
+```bash
+uv run main.py
+```
+
 ## Как пользоваться
 
 1. Вставьте ссылку на видео или плейлист, нажмите Enter или «Скачать».
