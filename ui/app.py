@@ -3,6 +3,7 @@ import queue
 import re
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any, Dict, Optional, Tuple, Callable
 
@@ -16,7 +17,7 @@ from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
 from downloader.cleanup import delete_task_files
 
 from utils.config import load_config, save_config, get_app_version
-from utils.paths import default_download_dir
+from utils.paths import default_download_dir, stuff_dir
 from ui.dialogs import show_error, show_info, show_warning, ask_yes_no
 from ui.tooltips import add_tooltip
 from utils.clipboard import install_layout_independent_clipboard_bindings
@@ -341,8 +342,16 @@ class App(tk.Tk):
             )
             return
 
+        target_dir = filedialog.askdirectory(
+            title="Выберите папку для установки ffmpeg",
+            initialdir=str(stuff_dir()),
+        )
+        if not target_dir:
+            show_warning("FFmpeg", "Установка отменена: папка не выбрана.", parent=self)
+            return
+
         def worker() -> None:
-            ok, msg, _ = install_ffmpeg()
+            ok, msg, _ = install_ffmpeg(target_root=Path(target_dir))
             if ok:
                 self.msg_q.put(("task_update", "__ui__", {"ui_info": msg}))
             else:

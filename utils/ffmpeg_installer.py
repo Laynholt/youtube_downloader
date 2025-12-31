@@ -83,7 +83,7 @@ def _move_bin_contents(src_bin: Path, dst_bin: Path) -> Path:
     return moved or dst_bin
 
 
-def install_ffmpeg(progress: Optional[Callable[[str], None]] = None) -> Tuple[bool, str, Optional[Path]]:
+def install_ffmpeg(progress: Optional[Callable[[str], None]] = None, target_root: Optional[Path] = None) -> Tuple[bool, str, Optional[Path]]:
     """
     Скачивает и разворачивает портативный ffmpeg (Windows, gyan.dev).
     Возвращает (ok, message, path_to_ffmpeg).
@@ -91,7 +91,7 @@ def install_ffmpeg(progress: Optional[Callable[[str], None]] = None) -> Tuple[bo
     if os.name != "nt":
         return False, "Авто-установка реализована только для Windows (nt).", None
 
-    target_root = stuff_dir() / FFMPEG_DIRNAME
+    target_root = target_root or (stuff_dir() / FFMPEG_DIRNAME)
     target_root.mkdir(parents=True, exist_ok=True)
     tmp_dir = Path(tempfile.mkdtemp(prefix="ffmpeg_dl_"))
     archive_path = tmp_dir / "ffmpeg.zip"
