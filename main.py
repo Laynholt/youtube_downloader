@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 import importlib.util
-import sys
 import tkinter as tk
 
 from ui.dialogs import show_error

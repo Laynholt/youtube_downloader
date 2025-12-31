@@ -1,11 +1,10 @@
-from __future__ import annotations
-
 import os
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Callable
 
 import sys
 from downloader.ytdlp_client import (
@@ -53,6 +52,105 @@ class TaskCtx:
         self.row: Optional[TaskRow] = None
 
 
+class UpdateProgressWindow:
+    def __init__(self, master: tk.Tk, colors: Dict[str, str], on_cancel: Optional[Callable[[], None]] = None) -> None:
+        self.master = master
+        self.colors = colors
+        self._on_cancel = on_cancel
+        self.win = tk.Toplevel(master)
+        self.win.title("Обновление")
+        try:
+            self.win.iconbitmap("assets/icon.ico")
+        except Exception:
+            pass
+        self.win.configure(bg=self.colors["panel"])
+        self.win.transient(master)
+        self.win.grab_set()
+        self.win.resizable(False, False)
+        self.win.protocol("WM_DELETE_WINDOW", self._handle_close)
+
+        frame = ttk.Frame(self.win, padding=14, style="Panel.TFrame")
+        frame.pack(fill="both", expand=True)
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self.status_var, style="Muted.TLabel", wraplength=320, justify="left").pack(anchor="w", pady=(6, 0))
+
+        self.pb = ttk.Progressbar(frame, mode="indeterminate", length=320, maximum=100)
+        self.pb.pack(fill="x", pady=(12, 0))
+        try:
+            self.pb.start(12)
+        except Exception:
+            pass
+
+        self._link_lbl: Optional[ttk.Label] = None
+
+        frame.update_idletasks()
+        w = max(360, frame.winfo_width() + 40)
+        h = max(100, frame.winfo_height() + 20)
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+
+    def set_status(self, text: str) -> None:
+        self.status_var.set(text)
+        self._maybe_set_link(text)
+
+    def set_progress(self, text: str, ratio: Optional[float]) -> None:
+        self.set_status(text)
+        if ratio is None:
+            try:
+                self.pb.configure(mode="indeterminate")
+                self.pb.start(12)
+            except Exception:
+                pass
+            return
+        try:
+            self.pb.stop()
+            self.pb.configure(mode="determinate")
+            self.pb["value"] = max(0, min(100, int(ratio * 100)))
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        try:
+            self.pb.stop()
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
+    def _handle_close(self) -> None:
+        try:
+            if self._on_cancel:
+                self._on_cancel()
+        finally:
+            self.close()
+
+    def _maybe_set_link(self, text: str) -> None:
+        m = re.search(r"https?://\S+", text or "")
+        if not m:
+            return
+        url = m.group(0).rstrip(".,)")
+        if self._link_lbl is None:
+            self._link_lbl = ttk.Label(self.win, text=url, foreground=self.colors["accent"], style="Panel.TLabel", cursor="hand2", wraplength=340)
+            self._link_lbl.pack(fill="x", pady=(6, 0))
+            self._link_lbl.bind("<Button-1>", lambda _e: self._open_link(url))
+        else:
+            self._link_lbl.configure(text=url)
+
+    @staticmethod
+    def _open_link(url: str) -> None:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -84,6 +182,12 @@ class App(tk.Tk):
 
         self._debounce_job: Optional[str] = None
         self._current_preview_tk: Optional[Any] = None
+        self._update_progress_win: Optional[UpdateProgressWindow] = None
+        self._update_cancel_evt: Optional[threading.Event] = None
+        self._update_thread: Optional[threading.Thread] = None
+        self._update_page_url: str = ""
+        self._update_download_url: str = ""
+        self._closing = False
 
         self.default_title = "Вставьте ссылку на видео или плейлист."
         self.url_placeholder = "Ссылка на видео или плейлист"
@@ -98,6 +202,7 @@ class App(tk.Tk):
         except Exception:
             pass
 
+        self.protocol("WM_DELETE_WINDOW", self._on_close_clicked)
         self.after(80, self._poll_queue)
         self.after(600, self._check_ffmpeg_presence)
 
@@ -293,7 +398,7 @@ class App(tk.Tk):
         if not frozen:
             msg = (
                 f"Доступна новая версия: {latest} (у вас {current}).\n\n"
-                f"Запустите 'git pull' или скачайте с {page_url}."
+                f"Запустите 'git pull' или скачайте с {page_url}"
             )
             show_info("Обновления", msg, parent=self)
             return
@@ -309,17 +414,118 @@ class App(tk.Tk):
         if not consent:
             return
 
+        self._start_update_install(download_url, page_url)
+
+    def _start_update_install(self, download_url: str, page_url: str = "") -> None:
+        if not download_url:
+            show_error("Обновления", "Не удалось получить ссылку на обновление.", parent=self)
+            return
+
+        try:
+            if self._update_progress_win:
+                self._update_progress_win.close()
+        except Exception:
+            pass
+
+        self._update_cancel_evt = threading.Event()
+        self._update_page_url = page_url or ""
+        self._update_download_url = download_url or ""
+        self._update_progress_win = UpdateProgressWindow(self, self.colors, on_cancel=self._cancel_update_download)
+        self._update_progress_win.set_status("Подготовка обновления...")
+
         def worker() -> None:
-            def progress(msg: str) -> None:
-                self.msg_q.put(("task_update", "__ui__", {"ui_info": msg}))
+            def progress(msg: str, ratio: Optional[float] = None) -> None:
+                self.msg_q.put(("task_update", "__ui__", {"update_progress": {"msg": msg, "ratio": ratio}}))
 
-            ok, msg = install_update_from_url(download_url, progress=progress)
-            if ok:
-                self.msg_q.put(("task_update", "__ui__", {"ui_info": msg}))
-            else:
-                self.msg_q.put(("task_update", "__ui__", {"ui_error": msg}))
+            ok, msg = install_update_from_url(
+                download_url,
+                progress=progress,
+                cancel=self._update_cancel_evt.is_set if self._update_cancel_evt else None,
+            )
+            canceled = bool(self._update_cancel_evt.is_set()) if self._update_cancel_evt else False
+            self.msg_q.put(("task_update", "__ui__", {"update_progress_done": {"ok": ok, "msg": msg, "canceled": canceled}}))
 
-        threading.Thread(target=worker, daemon=True).start()
+        t = threading.Thread(target=worker, daemon=True)
+        self._update_thread = t
+        t.start()
+
+    def _handle_update_result(self, data: Dict[str, Any]) -> None:
+        ok = bool(data.get("ok"))
+        canceled = bool(data.get("canceled"))
+        msg = str(data.get("msg") or "")
+        if self._update_progress_win:
+            self._update_progress_win.set_status(msg)
+
+        if canceled:
+            if self._update_progress_win:
+                self._update_progress_win.close()
+                self._update_progress_win = None
+            self._update_cancel_evt = None
+            self._update_thread = None
+            return
+
+        if ok:
+            if self._update_progress_win:
+                info_msg = (msg + "\n\nПриложение закроется и обновится. Перезапустите его вручную.").strip()
+                self._update_progress_win.set_status(info_msg)
+            self._update_cancel_evt = None
+            self._update_thread = None
+            # даём пользователю увидеть уведомление 3 секунды, затем выходим
+            self.after(3000, self._exit_for_update)
+        else:
+            if self._update_progress_win:
+                self._update_progress_win.close()
+                self._update_progress_win = None
+            show_error("Обновление", msg or "Не удалось установить обновление.", parent=self)
+            self._update_cancel_evt = None
+            self._update_thread = None
+
+    def _exit_for_update(self) -> None:
+        try:
+            if self._update_progress_win:
+                self._update_progress_win.close()
+        finally:
+            self._update_progress_win = None
+            try:
+                self.destroy()
+            finally:
+                # Завершаем процесс гарантированно, чтобы PowerShell смог перезаписать файлы.
+                os._exit(0)
+
+    def _cancel_update_download(self) -> None:
+        evt = self._update_cancel_evt
+        if evt:
+            evt.set()
+        # Не ждём поток долго, просто дадим ему завершиться и отправить в очередь результат
+        if self._update_progress_win:
+            self._update_progress_win.set_status("Отмена загрузки...")
+
+    def _on_close_clicked(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        if self._update_cancel_evt:
+            self._update_cancel_evt.set()
+        # останавливаем все задачи и фоновые потоки, чтобы не держали процесс
+        for ctx in list(self.tasks.values()):
+            try:
+                ctx.cancel_flag.set()
+                ctx.pause_flag.clear()
+                th = ctx.worker
+                if th and th.is_alive():
+                    th.join(timeout=1.5)
+            except Exception:
+                pass
+        try:
+            if self._update_thread and self._update_thread.is_alive():
+                self._update_thread.join(timeout=1.5)
+        except Exception:
+            pass
+
+        try:
+            self.destroy()
+        finally:
+            os._exit(0)
 
     def _open_about(self) -> None:
         win = tk.Toplevel(self)
@@ -980,6 +1186,21 @@ class App(tk.Tk):
                         show_warning("Предупреждение", str(fields["ui_warning"]), parent=self)
                         continue
 
+                    if "update_progress" in fields:
+                        if self._update_progress_win:
+                            prog = fields["update_progress"]
+                            if isinstance(prog, dict):
+                                msg = str(prog.get("msg") or "")
+                                ratio = prog.get("ratio")
+                                self._update_progress_win.set_progress(msg, ratio)
+                            else:
+                                self._update_progress_win.set_status(str(prog))
+                        continue
+
+                    if "update_progress_done" in fields:
+                        self._handle_update_result(fields["update_progress_done"])
+                        continue
+
                     if "update_check" in fields:
                         self._handle_update_check(fields["update_check"])
                         continue
@@ -1025,7 +1246,8 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         finally:
-            self.after(80, self._poll_queue)
+            if not getattr(self, "_closing", False):
+                self.after(80, self._poll_queue)
 
     def _on_task_finished(self, task_id: str, ctx: Optional[TaskCtx] = None) -> None:
         ctx = ctx or self.tasks.get(task_id)

@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import json
 from typing import Any, Dict
 
-APP_VERSION = "1.1"
+APP_VERSION = "0.9"
 
 from .paths import config_path, stuff_dir
 

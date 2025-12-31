@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 import re
 import textwrap
 import tkinter as tk
 from tkinter import ttk
 from typing import Optional
+import webbrowser
 
 
 _COLORS = {
@@ -17,16 +16,13 @@ _COLORS = {
     "error": "#f06b60",
 }
 
-
 _STYLE_APPLIED = False
 
 
 def _sanitize_message(text: str) -> str:
     if not text:
         return ""
-    # Убираем ANSI-escape последовательности (цвета и пр.)
     text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
-    # Стрип лишних пробелов/переводов строки по краям
     return text.strip()
 
 
@@ -71,7 +67,12 @@ def _ensure_style() -> None:
 def _show_dialog(kind: str, title: str, message: str, parent: Optional[tk.Widget]) -> None:
     _ensure_style()
     clean_msg = _sanitize_message(message)
-    display_msg = _wrap_message(clean_msg, width=90)
+    url_match = re.search(r"https?://\S+", clean_msg)
+    url = url_match.group(0).rstrip(".,)") if url_match else ""
+    display_source = clean_msg
+    if url:
+        display_source = clean_msg.replace(url, "").strip()
+    display_msg = _wrap_message(display_source, width=90)
 
     root = parent if parent is not None else (tk._default_root or tk.Tk())
     created_root = False
@@ -114,8 +115,19 @@ def _show_dialog(kind: str, title: str, message: str, parent: Optional[tk.Widget
     )
     msg_lbl.pack(fill="x")
 
+    if url:
+        def open_link(_evt: Optional[tk.Event] = None) -> None:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+        link_lbl = ttk.Label(frame, text=url, style="Dialog.TLabel", foreground=_COLORS["accent"], cursor="hand2", justify="left")
+        link_lbl.pack(fill="x", pady=(0, 4), anchor="w")
+        link_lbl.bind("<Button-1>", open_link)
+
     btn_row = ttk.Frame(frame, style="Dialog.TFrame")
-    btn_row.pack(fill="x", pady=(12, 0))
+    btn_row.pack(fill="x", pady=(8, 0))
 
     def copy_text() -> None:
         try:
@@ -124,7 +136,7 @@ def _show_dialog(kind: str, title: str, message: str, parent: Optional[tk.Widget
         except Exception:
             pass
 
-    ttk.Button(btn_row, text="Копировать", style="Dialog.TButton", command=copy_text).pack(side="left")
+    ttk.Button(btn_row, text="Копировать текст", style="Dialog.TButton", command=copy_text).pack(side="left")
     ttk.Button(btn_row, text="OK", style="Dialog.TButton", command=win.destroy).pack(side="right")
 
     win.update_idletasks()
@@ -180,26 +192,19 @@ def ask_yes_no(title: str, message: str, parent: Optional[tk.Widget] = None, *, 
     frame.pack(fill="both", expand=True)
 
     ttk.Label(frame, text=title, style="Dialog.Title.TLabel", anchor="w").pack(fill="x", pady=(0, 6))
-    ttk.Label(
-        frame,
-        text=display_msg,
-        style="Dialog.TLabel",
-        justify="left",
-        anchor="w",
-        wraplength=560,
-    ).pack(fill="x")
+    ttk.Label(frame, text=display_msg, style="Dialog.TLabel", foreground=_COLORS["text"], justify="left", anchor="w", wraplength=520).pack(fill="x")
 
     btn_row = ttk.Frame(frame, style="Dialog.TFrame")
     btn_row.pack(fill="x", pady=(12, 0))
 
-    result = tk.BooleanVar(value=False)
+    result = {"value": False}
 
-    def choose(value: bool) -> None:
-        result.set(value)
+    def choose(val: bool) -> None:
+        result["value"] = val
         win.destroy()
 
-    ttk.Button(btn_row, text=yes, style="Dialog.TButton", command=lambda: choose(True)).pack(side="right", padx=(8, 0))
-    ttk.Button(btn_row, text=no, style="Dialog.TButton", command=lambda: choose(False)).pack(side="right")
+    ttk.Button(btn_row, text=no, style="Dialog.TButton", command=lambda: choose(False)).pack(side="left")
+    ttk.Button(btn_row, text=yes, style="Dialog.TButton", command=lambda: choose(True)).pack(side="right")
 
     win.update_idletasks()
     if parent is not None:
@@ -207,7 +212,7 @@ def ask_yes_no(title: str, message: str, parent: Optional[tk.Widget] = None, *, 
         y = parent.winfo_rooty() + max(0, (parent.winfo_height() - win.winfo_height()) // 2)
         win.geometry(f"+{x}+{y}")
 
-    win.wait_variable(result)
+    win.wait_window()
     if created_root:
         root.destroy()
-    return bool(result.get())
+    return bool(result["value"])

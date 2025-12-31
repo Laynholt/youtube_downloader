@@ -1,7 +1,4 @@
-from __future__ import annotations
-
 import re
-import shutil
 import time
 from typing import Optional, TYPE_CHECKING, Any
 
