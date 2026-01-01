@@ -5,16 +5,8 @@ from tkinter import ttk
 from typing import Optional
 import webbrowser
 
-
-_COLORS = {
-    "bg": "#222429",
-    "panel": "#262d3b",
-    "text": "#e6e9f0",
-    "muted": "#b1b7c7",
-    "accent": "#5fa8f5",
-    "warn": "#f0b23d",
-    "error": "#f06b60",
-}
+from ui.theme import get_default_colors
+_COLORS = get_default_colors()
 
 _STYLE_APPLIED = False
 
@@ -136,7 +128,7 @@ def _show_dialog(kind: str, title: str, message: str, parent: Optional[tk.Widget
         except Exception:
             pass
 
-    ttk.Button(btn_row, text="Копировать текст", style="Dialog.TButton", command=copy_text).pack(side="left")
+    ttk.Button(btn_row, text="Копировать", style="Dialog.TButton", command=copy_text).pack(side="left", padx=(0, 4))
     ttk.Button(btn_row, text="OK", style="Dialog.TButton", command=win.destroy).pack(side="right")
 
     win.update_idletasks()

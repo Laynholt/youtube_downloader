@@ -1,13 +1,13 @@
 import os
-import queue
 import re
+import sys
+import queue
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any, Dict, Optional, Tuple, Callable
 
-import sys
 from downloader.ytdlp_client import (
     VideoInfo, TaskRuntime,
     fetch_video_info, download_task,
@@ -16,15 +16,17 @@ from downloader.ytdlp_client import (
 from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
 from downloader.cleanup import delete_task_files
 
-from utils.config import load_config, save_config, get_app_version
+
 from utils.paths import default_download_dir, stuff_dir
-from ui.dialogs import show_error, show_info, show_warning, ask_yes_no
-from ui.tooltips import add_tooltip
-from utils.clipboard import install_layout_independent_clipboard_bindings
 from utils.ffmpeg_installer import find_ffmpeg, install_ffmpeg
+from utils.config import load_config, save_config, get_app_version
+from utils.clipboard import install_layout_independent_clipboard_bindings
 from utils.updater import fetch_latest_release, compare_versions, install_update_from_url
 
-from .widgets import ScrollableFrame, TaskRow
+from ui.tooltips import add_tooltip
+from ui.dialogs import show_error, show_info, show_warning, ask_yes_no
+from ui.widgets import ScrollableFrame, TaskRow
+from ui.theme import get_default_colors
 
 GuiMsg = Tuple[str, str, Dict[str, Any]]  # ("task_update", task_id, fields)
 
@@ -162,15 +164,7 @@ class App(tk.Tk):
         self.msg_q: "queue.Queue[GuiMsg]" = queue.Queue()
         self.tasks: Dict[str, TaskCtx] = {}
         self._playlist_batches: Dict[str, Dict[str, Any]] = {}
-        self.colors = {
-            "bg": "#222429",
-            "panel": "#262d3b",
-            "panel_alt": "#2e3547",
-            "text": "#e6e9f0",
-            "muted": "#b1b7c7",
-            "accent": "#5fa8f5",
-            "accent_hover": "#76b6f7",
-        }
+        self.colors = get_default_colors()
 
         cfg = load_config()
         self.download_dir = str(cfg.get("download_dir") or default_download_dir())
@@ -186,8 +180,6 @@ class App(tk.Tk):
         self._update_progress_win: Optional[UpdateProgressWindow] = None
         self._update_cancel_evt: Optional[threading.Event] = None
         self._update_thread: Optional[threading.Thread] = None
-        self._update_page_url: str = ""
-        self._update_download_url: str = ""
         self._closing = False
 
         self.default_title = "Вставьте ссылку на видео или плейлист."
@@ -213,7 +205,6 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=12, style="Panel.TFrame")
         top.pack(fill="x")
 
-        ttk.Label(top, text="Ссылка на видео:", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         self.url_var = tk.StringVar()
         self.url_entry = ttk.Entry(top, textvariable=self.url_var, style="Panel.TEntry")
         self.url_entry.grid(row=0, column=0, sticky="we", padx=(0, 0))
@@ -423,9 +414,9 @@ class App(tk.Tk):
         if not consent:
             return
 
-        self._start_update_install(download_url, page_url)
+        self._start_update_install(download_url)
 
-    def _start_update_install(self, download_url: str, page_url: str = "") -> None:
+    def _start_update_install(self, download_url: str) -> None:
         if not download_url:
             show_error("Обновления", "Не удалось получить ссылку на обновление.", parent=self)
             return
@@ -437,8 +428,6 @@ class App(tk.Tk):
             pass
 
         self._update_cancel_evt = threading.Event()
-        self._update_page_url = page_url or ""
-        self._update_download_url = download_url or ""
         self._update_progress_win = UpdateProgressWindow(self, self.colors, on_cancel=self._cancel_update_download)
         self._update_progress_win.set_status("Подготовка обновления...")
 
@@ -454,9 +443,8 @@ class App(tk.Tk):
             canceled = bool(self._update_cancel_evt.is_set()) if self._update_cancel_evt else False
             self.msg_q.put(("task_update", "__ui__", {"update_progress_done": {"ok": ok, "msg": msg, "canceled": canceled}}))
 
-        t = threading.Thread(target=worker, daemon=True)
-        self._update_thread = t
-        t.start()
+        self._update_thread = threading.Thread(target=worker, daemon=True)
+        self._update_thread.start()
 
     def _handle_update_result(self, data: Dict[str, Any]) -> None:
         ok = bool(data.get("ok"))
@@ -831,7 +819,7 @@ class App(tk.Tk):
         def save_and_close() -> None:
             path = cookies_var.get().strip()
             self._save_cookies_path(path)
-            selected_code = code_by_label.get(quality_var.get(), "1080p")
+            selected_code = code_by_label.get(quality_var.get(), "max")
             self._save_quality_mode(selected_code)
             win.destroy()
 
@@ -984,9 +972,8 @@ class App(tk.Tk):
         def dl_worker() -> None:
             download_task(task_id=task_id, info=ctx.info, out_dir=ctx.out_dir, runtime=ctx.runtime, update=update)
 
-        t = threading.Thread(target=dl_worker, daemon=True)
-        ctx.worker = t
-        t.start()
+        ctx.worker = threading.Thread(target=dl_worker, daemon=True)
+        ctx.worker.start()
         return task_id
 
     def _enqueue_videos_batched(

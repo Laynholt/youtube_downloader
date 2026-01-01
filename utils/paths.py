@@ -25,3 +25,7 @@ def log_path() -> Path:
 
 def default_download_dir() -> Path:
     return Path.home() / "Downloads"
+
+
+def placeholder_path() -> Path:
+    return stuff_dir() / "preview_placeholder.png"

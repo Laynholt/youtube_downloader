@@ -5,14 +5,7 @@ from typing import Tuple
 
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 
-from utils.paths import stuff_dir
-
-
-_PLACEHOLDER_NAME = "preview_placeholder.png"
-
-
-def _placeholder_path() -> Path:
-    return stuff_dir() / _PLACEHOLDER_NAME
+from utils.paths import placeholder_path
 
 
 def ensure_placeholder_image(
@@ -23,7 +16,7 @@ def ensure_placeholder_image(
     Убеждаемся, что заглушка существует в stuff/.
     Если нет — рисуем и сохраняем.
     """
-    p = _placeholder_path()
+    p = placeholder_path()
     p.parent.mkdir(parents=True, exist_ok=True)
 
     if p.exists():
