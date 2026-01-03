@@ -13,7 +13,7 @@ from downloader.formatting import (
     wait_if_paused_or_cancelled,
 )
 from utils.ffmpeg_installer import find_ffmpeg
-from utils.paths import log_path
+from utils.text_utils import sanitize_text, truncate_text, ensure_file_logger
 
 UpdateFn = Callable[[str, Dict[str, Any]], None]
 
@@ -34,21 +34,10 @@ class TaskRuntime:
     seen_files: Set[str] = field(default_factory=set)
 
 
-_logger = logging.getLogger("ytdl")
+_logger = ensure_file_logger("ytdl")
 _cookies_file: Optional[str] = None
-_quality_mode: str = "1080p"  # audio | 360p | 480p | 720p | 1080p | max
-if not _logger.handlers:
-    _logger.setLevel(logging.INFO)
-    try:
-        lp = log_path()
-        lp.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(lp, encoding="utf-8")
-        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        _logger.addHandler(fh)
-    except Exception:
-        sh = logging.StreamHandler()
-        sh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        _logger.addHandler(sh)
+_quality_mode: str = "max"  # audio | 360p | 480p | 720p | 1080p | max
+_container_mode: str = "auto"  # auto | mp4 | mkv | webm
 
 
 def set_cookies_file(path: Optional[str]) -> None:
@@ -66,8 +55,19 @@ def set_quality_mode(mode: str) -> None:
     global _quality_mode
     allowed = {"audio", "360p", "480p", "720p", "1080p", "max"}
     normalized = str(mode).lower()
-    _quality_mode = normalized if normalized in allowed else "1080p"
+    _quality_mode = normalized if normalized in allowed else "max"
     _logger.info("Quality mode: %s", _quality_mode)
+
+
+def set_container_mode(mode: str) -> None:
+    """
+    Управляет целевым контейнером для вывода (auto/mp4/mkv/webm).
+    """
+    global _container_mode
+    allowed = {"auto", "mp4", "mkv", "webm"}
+    normalized = str(mode).lower()
+    _container_mode = normalized if normalized in allowed else "auto"
+    _logger.info("Container mode: %s", _container_mode)
 
 
 def _height_from_mode(mode: str) -> Optional[int]:
@@ -158,14 +158,19 @@ def download_task(
     ffmpeg_path = find_ffmpeg()
     ffmpeg_available = ffmpeg_path is not None
     fmt = _build_format_string(ffmpeg_available)
+    container_mode = _container_mode if ffmpeg_available else "auto"
+    remux_target = container_mode if container_mode in {"mp4", "mkv", "webm"} else None
 
     outtmpl = os.path.join(out_dir, "%(title).200s [%(id)s].%(ext)s")
 
     def push(fields: Dict[str, Any]) -> None:
         update(task_id, fields)
 
+    last_total_bytes: Optional[int] = None
+
     def progress_hook(d: Dict[str, Any]) -> None:
         wait_if_paused_or_cancelled(runtime.pause_flag, runtime.cancel_flag)
+        nonlocal last_total_bytes
 
         st = d.get("status")
         filename = d.get("filename") or ""
@@ -186,6 +191,14 @@ def download_task(
         if st == "downloading":
             total_b = d.get("total_bytes") or d.get("total_bytes_estimate")
             downloaded_b = d.get("downloaded_bytes")
+
+            if total_b:
+                if last_total_bytes is None or total_b > last_total_bytes:
+                    last_total_bytes = total_b
+                else:
+                    total_b = last_total_bytes
+            elif last_total_bytes is not None:
+                total_b = last_total_bytes
 
             pct: Optional[float] = None
             if total_b and downloaded_b is not None:
@@ -243,9 +256,9 @@ def download_task(
         st = str(d.get("status") or "")
         if st in ("started", "processing"):
             if "merge" in pp.lower() or "merger" in pp.lower() or "ffmpeg" in pp.lower():
-                push({"status": "Склейка (ffmpeg)…"})
+                push({"status": "Склейка (ffmpeg):"})
             else:
-                push({"status": f"Пост-обработка: {pp}…"})
+                push({"status": f"Пост-обработка: {pp}:"})
         elif st == "finished":
             push({"status": "Пост-обработка завершена"})
 
@@ -260,6 +273,10 @@ def download_task(
         "progress_hooks": [progress_hook],
         "postprocessor_hooks": [postprocessor_hook],
     }
+    if remux_target:
+        ydl_opts["merge_output_format"] = remux_target
+        ydl_opts.setdefault("postprocessors", [])
+        ydl_opts["postprocessors"].append({"key": "FFmpegVideoRemuxer", "preferedformat": remux_target})
     if ffmpeg_path:
         ydl_opts["ffmpeg_location"] = str(Path(ffmpeg_path).parent)
     if _cookies_file:
@@ -287,8 +304,9 @@ def download_task(
             push({"status": "Отменено", "progress": 0.0})
             _logger.info("Download cancelled after exception [%s]: %s", task_id, e)
         else:
-            push({"status": f"Ошибка: {e}"})
-            _logger.error("Download failed [%s]: %s", task_id, e)
+            err_txt = truncate_text(e, 160)
+            push({"status": f"Ошибка: {err_txt}"})
+            _logger.error("Download failed [%s]: %s", task_id, sanitize_text(e))
 
 
 def probe_url_kind(url: str) -> tuple[str, dict]:

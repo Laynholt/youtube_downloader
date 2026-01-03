@@ -11,17 +11,18 @@ from typing import Any, Dict, Optional, Tuple, Callable
 from downloader.ytdlp_client import (
     VideoInfo, TaskRuntime,
     fetch_video_info, download_task,
-    probe_url_kind, expand_playlist, set_cookies_file, set_quality_mode,
+    probe_url_kind, expand_playlist, set_cookies_file, set_quality_mode, set_container_mode,
 )
-from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk
+from downloader.thumbs import download_thumbnail_to_tk, load_placeholder_to_tk, load_placeholder_error_to_tk
 from downloader.cleanup import delete_task_files
 
 
 from utils.paths import default_download_dir, stuff_dir
-from utils.ffmpeg_installer import find_ffmpeg, install_ffmpeg
+from utils.ffmpeg_installer import find_ffmpeg, install_ffmpeg, set_ffmpeg_path
 from utils.config import load_config, save_config, get_app_version
 from utils.clipboard import install_layout_independent_clipboard_bindings
 from utils.updater import fetch_latest_release, compare_versions, install_update_from_url
+from utils.text_utils import ensure_file_logger, sanitize_text
 
 from ui.tooltips import add_tooltip
 from ui.dialogs import show_error, show_info, show_warning, ask_yes_no
@@ -55,13 +56,23 @@ class TaskCtx:
         self.row: Optional[TaskRow] = None
 
 
+_logger = ensure_file_logger("app")
+
+
 class UpdateProgressWindow:
-    def __init__(self, master: tk.Tk, colors: Dict[str, str], on_cancel: Optional[Callable[[], None]] = None) -> None:
+    def __init__(
+        self,
+        master: tk.Tk,
+        colors: Dict[str, str],
+        *,
+        title: str = "Обновление",
+        on_cancel: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.master = master
         self.colors = colors
         self._on_cancel = on_cancel
         self.win = tk.Toplevel(master)
-        self.win.title("Обновление")
+        self.win.title(title)
         try:
             self.win.iconbitmap("assets/icon.ico")
         except Exception:
@@ -167,22 +178,34 @@ class App(tk.Tk):
         self.colors = get_default_colors()
 
         cfg = load_config()
+        self.ffmpeg_available = bool(find_ffmpeg())
         self.download_dir = str(cfg.get("download_dir") or default_download_dir())
         if not self.download_dir:
             self.download_dir = str(default_download_dir())
         self.cookies_path = str(cfg.get("cookies_path") or "")
         self.quality_mode = self._pick_quality_mode(cfg)
+        self.container_mode = self._pick_container_mode(cfg)
+        self.auto_update_enabled = bool(cfg.get("auto_update"))
+        self.ffmpeg_path = str(cfg.get("ffmpeg_path") or "")
+        if self.ffmpeg_path:
+            set_ffmpeg_path(Path(self.ffmpeg_path))
+        self.ffmpeg_available = bool(find_ffmpeg())
         set_cookies_file(self.cookies_path or None)
         set_quality_mode(self.quality_mode)
+        set_container_mode(self._effective_container_mode())
 
         self._debounce_job: Optional[str] = None
         self._current_preview_tk: Optional[Any] = None
         self._update_progress_win: Optional[UpdateProgressWindow] = None
         self._update_cancel_evt: Optional[threading.Event] = None
         self._update_thread: Optional[threading.Thread] = None
+        self._ffmpeg_progress_win: Optional[UpdateProgressWindow] = None
+        self._ffmpeg_cancel_evt: Optional[threading.Event] = None
+        self._ffmpeg_install_thread: Optional[threading.Thread] = None
+        self._auto_update_check_started = False
         self._closing = False
 
-        self.default_title = "Вставьте ссылку на видео или плейлист."
+        self.default_title = "👆 Вставьте ссылку на видео или плейлист выше 👆"
         self.url_placeholder = "Ссылка на видео или плейлист"
 
         self._init_theme()
@@ -198,6 +221,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close_clicked)
         self.after(80, self._poll_queue)
         self.after(600, self._check_ffmpeg_presence)
+        self.after(1400, self._auto_check_updates_if_enabled)
 
     # ---------------- UI ----------------
 
@@ -206,7 +230,7 @@ class App(tk.Tk):
         top.pack(fill="x")
 
         self.url_var = tk.StringVar()
-        self.url_entry = ttk.Entry(top, textvariable=self.url_var, style="Panel.TEntry")
+        self.url_entry = ttk.Entry(top, textvariable=self.url_var, style="Url.TEntry")
         self.url_entry.grid(row=0, column=0, sticky="we", padx=(0, 0))
         self.url_entry.bind("<KeyRelease>", self._on_url_changed)
         self.url_entry.bind("<FocusIn>", self._url_focus_in)
@@ -284,10 +308,100 @@ class App(tk.Tk):
         self._update_config(cookies_path=path)
 
     def _save_quality_mode(self, mode: str) -> None:
-        normalized = self._normalize_quality_mode(mode) or "1080p"
+        normalized = self._normalize_quality_mode(mode) or "max"
         self.quality_mode = normalized
         set_quality_mode(self.quality_mode)
         self._update_config(quality=self.quality_mode)
+        return None
+
+    def _save_container_mode(self, mode: str) -> None:
+        normalized = self._normalize_container_mode(mode)
+        self.container_mode = normalized
+        set_container_mode(self._effective_container_mode())
+        self._update_config(container=self.container_mode)
+
+    def _save_ffmpeg_path(self, path: str) -> None:
+        path = path.strip()
+        if path:
+            set_ffmpeg_path(Path(path))
+            self.ffmpeg_path = path
+            self.ffmpeg_available = bool(find_ffmpeg(refresh=True))
+        else:
+            self.ffmpeg_path = ""
+            self.ffmpeg_available = bool(find_ffmpeg(refresh=True))
+        self._update_config(ffmpeg_path=self.ffmpeg_path)
+        set_container_mode(self._effective_container_mode())
+
+    def _prompt_ffmpeg_choice(self) -> str:
+        """
+        Возвращает "install" | "pick" | "skip".
+        """
+        win = tk.Toplevel(self)
+        win.title("FFmpeg не найден")
+        try:
+            win.iconbitmap("assets/icon.ico")
+        except Exception:
+            pass
+        win.configure(bg=self.colors["panel"])
+        win.transient(self)
+        win.grab_set()
+        win.resizable(False, False)
+
+        frame = ttk.Frame(win, padding=14, style="Panel.TFrame")
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frame,
+            text="ffmpeg нужен для склейки лучшего видео+аудио и качества выше 1080p.",
+            style="Panel.TLabel",
+            wraplength=420,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+
+        result = {"choice": "skip"}
+
+        def set_choice(val: str) -> None:
+            result["choice"] = val
+            win.destroy()
+
+        ttk.Button(frame, text="Отмена", style="Ghost.TButton", command=win.destroy).grid(row=1, column=0, pady=(12, 0))
+        ttk.Button(frame, text="Указать путь", style="Ghost.TButton", command=lambda: set_choice("pick")).grid(row=1, column=1, padx=(0, 8), pady=(12, 0))
+        ttk.Button(frame, text="Установить", style="Accent.TButton", command=lambda: set_choice("install")).grid(row=1, column=2, padx=(0, 8), pady=(12, 0))
+
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_columnconfigure(1, weight=1)
+        frame.grid_columnconfigure(2, weight=1)
+
+        win.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - win.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - win.winfo_height()) // 2)
+        win.geometry(f"+{x}+{y}")
+        win.wait_window()
+        return result["choice"]
+
+    def _choose_existing_ffmpeg(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Укажите ffmpeg.exe",
+            filetypes=[("ffmpeg", "ffmpeg.exe"), ("Все файлы", "*.*")],
+            initialdir=os.path.dirname(self.ffmpeg_path or self.download_dir),
+        )
+        if not path:
+            return
+        picked = set_ffmpeg_path(Path(path))
+        if picked and picked.exists():
+            self.ffmpeg_available = True
+            self.ffmpeg_path = str(picked)
+            self._update_config(ffmpeg_path=self.ffmpeg_path)
+            set_container_mode(self._effective_container_mode())
+            show_info("FFmpeg", f"FFmpeg найден: {picked}", parent=self)
+        else:
+            show_error("FFmpeg", "Указанный путь не подходит для ffmpeg.", parent=self)
+
+    def _save_auto_update(self, enabled: bool) -> None:
+        self.auto_update_enabled = bool(enabled)
+        self._update_config(auto_update=self.auto_update_enabled)
+        if self.auto_update_enabled and not self._auto_update_check_started:
+            self._auto_check_updates_if_enabled()
 
     @staticmethod
     def _normalize_quality_mode(mode: Any) -> Optional[str]:
@@ -295,19 +409,37 @@ class App(tk.Tk):
         mode_str = str(mode).lower() if mode is not None else ""
         return mode_str if mode_str in allowed else None
 
+    @staticmethod
+    def _normalize_container_mode(mode: Any) -> str:
+        allowed = {"auto", "mp4", "mkv", "webm"}
+        mode_str = str(mode).lower() if mode is not None else ""
+        return mode_str if mode_str in allowed else "auto"
+
     def _pick_quality_mode(self, cfg: Dict[str, Any]) -> str:
         saved = self._normalize_quality_mode(cfg.get("quality"))
         if saved:
             return saved
-        legacy_max_quality = cfg.get("max_quality")
-        if legacy_max_quality is not None:
-            return "max" if bool(legacy_max_quality) else "1080p"
-        return "1080p"
+        return "max"
+
+    def _pick_container_mode(self, cfg: Dict[str, Any]) -> str:
+        saved = self._normalize_container_mode(cfg.get("container"))
+        return saved if saved else "auto"
+
+    def _effective_container_mode(self) -> str:
+        if not self.ffmpeg_available:
+            return "auto"
+        return self.container_mode or "auto"
 
     def _update_config(self, **kwargs: Any) -> None:
         cfg = load_config()
         cfg.update(kwargs)
         save_config(cfg)
+
+    def _log_error(self, msg: str, exc: Optional[Exception] = None) -> None:
+        text = sanitize_text(msg)
+        if exc:
+            text = f"{text} | {sanitize_text(exc)}"
+        _logger.error(text)
 
     # -------------- Startup checks -----
 
@@ -317,20 +449,18 @@ class App(tk.Tk):
         self._ffmpeg_check_done = True
 
         if find_ffmpeg():
+            self.ffmpeg_available = True
+            set_container_mode(self._effective_container_mode())
             return
 
-        consent = ask_yes_no(
-            "FFmpeg не найден",
-            "ffmpeg нужен для склейки лучшего видео+аудио и качества выше 1080p.\n\n"
-            "Установить автоматически? (скачает ~80-90 МБ с gyan.dev)",
-            parent=self,
-        )
-        if not consent:
-            show_warning(
-                "FFmpeg не установлен",
-                "Без ffmpeg загрузки будут в виде одного файла (best), склейка bestvideo+bestaudio недоступна.",
-                parent=self,
-            )
+        choice = self._prompt_ffmpeg_choice()
+        if choice == "pick":
+            self._choose_existing_ffmpeg()
+            return
+        if choice != "install":
+            msg = "Без ffmpeg загрузки будут в виде одного файла (best), склейка bestvideo+bestaudio недоступна."
+            self._log_error(msg)
+            show_warning("FFmpeg не установлен", msg, parent=self)
             return
 
         target_dir = filedialog.askdirectory(
@@ -341,18 +471,50 @@ class App(tk.Tk):
             show_warning("FFmpeg", "Установка отменена: папка не выбрана.", parent=self)
             return
 
-        def worker() -> None:
-            ok, msg, _ = install_ffmpeg(target_root=Path(target_dir))
-            if ok:
-                self.msg_q.put(("task_update", "__ui__", {"ui_info": msg}))
-            else:
-                self.msg_q.put(("task_update", "__ui__", {"ui_error": msg}))
+        try:
+            if self._ffmpeg_progress_win:
+                self._ffmpeg_progress_win.close()
+        except Exception:
+            pass
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._ffmpeg_cancel_evt = threading.Event()
+        self._ffmpeg_progress_win = UpdateProgressWindow(
+            self,
+            self.colors,
+            title="Установка FFmpeg",
+            on_cancel=self._cancel_ffmpeg_install,
+        )
+        self._ffmpeg_progress_win.set_status("Подготовка установки...")
+
+        def worker() -> None:
+            def progress(msg: str, ratio: Optional[float] = None) -> None:
+                self.msg_q.put(("task_update", "__ui__", {"ffmpeg_progress": {"msg": msg, "ratio": ratio}}))
+
+            ok, msg, path = install_ffmpeg(
+                target_root=Path(target_dir),
+                progress=progress,
+                cancel=self._ffmpeg_cancel_evt.is_set if self._ffmpeg_cancel_evt else None,
+            )
+            canceled = bool(self._ffmpeg_cancel_evt.is_set()) if self._ffmpeg_cancel_evt else False
+            self.msg_q.put(("task_update", "__ui__", {"ffmpeg_done": {"ok": ok, "msg": msg, "canceled": canceled, "path": str(path) if path else ""}}))
+
+        self._ffmpeg_install_thread = threading.Thread(target=worker, daemon=True)
+        self._ffmpeg_install_thread.start()
 
     # -------------- Updates -------------
 
+    def _auto_check_updates_if_enabled(self) -> None:
+        if self._auto_update_check_started:
+            return
+        if not self.auto_update_enabled:
+            return
+        self._auto_update_check_started = True
+        self._start_update_check(auto=True)
+
     def _on_check_updates_clicked(self) -> None:
+        self._start_update_check(auto=False)
+
+    def _start_update_check(self, *, auto: bool = False) -> None:
         def worker() -> None:
             try:
                 latest = fetch_latest_release()
@@ -374,12 +536,14 @@ class App(tk.Tk):
                                 "current": current_ver,
                                 "cmp": cmp,
                                 "frozen": is_frozen,
+                                "auto": auto,
                             }
                         },
                     )
                 )
             except Exception as e:
-                self.msg_q.put(("task_update", "__ui__", {"ui_error": f"Не удалось проверить обновления: {e}"}))
+                if not auto:
+                    self.msg_q.put(("task_update", "__ui__", {"ui_error": f"Не удалось проверить обновления: {e}"}))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -390,9 +554,11 @@ class App(tk.Tk):
         frozen = bool(data.get("frozen"))
         download_url = data.get("download_url") or ""
         page_url = data.get("page_url") or ""
+        auto = bool(data.get("auto"))
 
         if cmp <= 0 or not latest:
-            show_info("Обновления", f"У вас актуальная версия ({current}).", parent=self)
+            if not auto:
+                show_info("Обновления", f"У вас актуальная версия ({current}).", parent=self)
             return
 
         if not frozen:
@@ -401,6 +567,10 @@ class App(tk.Tk):
                 f"Запустите 'git pull' или скачайте с {page_url}"
             )
             show_info("Обновления", msg, parent=self)
+            return
+
+        if auto:
+            self._start_update_install(download_url)
             return
 
         consent = ask_yes_no(
@@ -418,7 +588,9 @@ class App(tk.Tk):
 
     def _start_update_install(self, download_url: str) -> None:
         if not download_url:
-            show_error("Обновления", "Не удалось получить ссылку на обновление.", parent=self)
+            msg = "Не удалось получить ссылку на обновление."
+            self._log_error(msg)
+            show_error("Обновления", msg, parent=self)
             return
 
         try:
@@ -474,8 +646,47 @@ class App(tk.Tk):
                 self._update_progress_win.close()
                 self._update_progress_win = None
             show_error("Обновление", msg or "Не удалось установить обновление.", parent=self)
+            self._log_error(msg or "Не удалось установить обновление.")
             self._update_cancel_evt = None
             self._update_thread = None
+
+    def _handle_ffmpeg_progress(self, data: Dict[str, Any]) -> None:
+        msg = str(data.get("msg") or "")
+        ratio = data.get("ratio")
+        if not self._ffmpeg_progress_win:
+            self._ffmpeg_progress_win = UpdateProgressWindow(
+                self, self.colors, title="Установка FFmpeg", on_cancel=self._cancel_ffmpeg_install
+            )
+        try:
+            if ratio is None or isinstance(ratio, bool):
+                self._ffmpeg_progress_win.set_status(msg)
+            else:
+                self._ffmpeg_progress_win.set_progress(msg, float(ratio))
+        except Exception:
+            pass
+
+    def _handle_ffmpeg_done(self, data: Dict[str, Any]) -> None:
+        ok = bool(data.get("ok"))
+        canceled = bool(data.get("canceled"))
+        msg = str(data.get("msg") or "")
+        if self._ffmpeg_progress_win:
+            self._ffmpeg_progress_win.set_status(msg or ("Установка отменена" if canceled else ""))
+            self._ffmpeg_progress_win.close()
+            self._ffmpeg_progress_win = None
+        self._ffmpeg_cancel_evt = None
+        self._ffmpeg_install_thread = None
+        if canceled:
+            show_info("FFmpeg", msg or "Установка ffmpeg отменена.", parent=self)
+            return
+        if ok:
+            self.ffmpeg_available = True
+            set_container_mode(self._effective_container_mode())
+            if data.get("path"):
+                self._save_ffmpeg_path(str(data.get("path")))
+            show_info("FFmpeg", msg or "FFmpeg установлен.", parent=self)
+        else:
+            show_error("FFmpeg", msg or "Не удалось установить ffmpeg.", parent=self)
+            self._log_error(msg or "Не удалось установить ffmpeg.")
 
     def _exit_for_update(self) -> None:
         try:
@@ -497,12 +708,21 @@ class App(tk.Tk):
         if self._update_progress_win:
             self._update_progress_win.set_status("Отмена загрузки...")
 
+    def _cancel_ffmpeg_install(self) -> None:
+        evt = self._ffmpeg_cancel_evt
+        if evt:
+            evt.set()
+        if self._ffmpeg_progress_win:
+            self._ffmpeg_progress_win.set_status("Отмена загрузки ffmpeg...")
+
     def _on_close_clicked(self) -> None:
         if self._closing:
             return
         self._closing = True
         if self._update_cancel_evt:
             self._update_cancel_evt.set()
+        if self._ffmpeg_cancel_evt:
+            self._ffmpeg_cancel_evt.set()
         # останавливаем все задачи и фоновые потоки, чтобы не держали процесс
         for ctx in list(self.tasks.values()):
             try:
@@ -516,6 +736,11 @@ class App(tk.Tk):
         try:
             if self._update_thread and self._update_thread.is_alive():
                 self._update_thread.join(timeout=1.5)
+        except Exception:
+            pass
+        try:
+            if self._ffmpeg_install_thread and self._ffmpeg_install_thread.is_alive():
+                self._ffmpeg_install_thread.join(timeout=1.5)
         except Exception:
             pass
 
@@ -619,6 +844,25 @@ class App(tk.Tk):
             lightcolor=colors["panel_alt"],
             darkcolor=colors["panel_alt"],
             padding=4,
+        )
+        style.configure(
+            "Url.TEntry",
+            fieldbackground=colors["panel"],
+            background=colors["panel"],
+            foreground=colors["text"],
+            insertcolor=colors["text"],
+            bordercolor=colors["accent"],
+            lightcolor=colors["accent"],
+            darkcolor=colors["accent"],
+            padding=5,
+        )
+        style.map(
+            "Url.TEntry",
+            fieldbackground=[("focus", colors["panel"])],
+            background=[("focus", colors["panel"])],
+            bordercolor=[("focus", colors["accent_hover"])],
+            lightcolor=[("focus", colors["accent_hover"])],
+            darkcolor=[("focus", colors["accent_hover"])],
         )
         style.configure(
             "Panel.TCombobox",
@@ -793,7 +1037,23 @@ class App(tk.Tk):
 
         ttk.Button(frame, text="Выбрать…", style="Accent.TButton", command=choose_file).grid(row=1, column=2, padx=(8, 0), pady=(6, 0))
 
-        ttk.Label(frame, text="Качество загрузки:", style="PanelBold.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(frame, text="Путь к FFmpeg:", style="PanelBold.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 0))
+        ffmpeg_var = tk.StringVar(value=self.ffmpeg_path)
+        ffmpeg_entry = ttk.Entry(frame, textvariable=ffmpeg_var, width=52, style="Panel.TEntry")
+        ffmpeg_entry.grid(row=3, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        add_tooltip(ffmpeg_entry, "Укажите путь к ffmpeg (папка с ffmpeg.exe или сам файл).")
+
+        def choose_ffmpeg_dir() -> None:
+            path = filedialog.askdirectory(
+                title="Укажите папку с ffmpeg (bin)",
+                initialdir=os.path.dirname(ffmpeg_var.get() or self.download_dir),
+            )
+            if path:
+                ffmpeg_var.set(path)
+
+        ttk.Button(frame, text="Выбрать…", style="Accent.TButton", command=choose_ffmpeg_dir).grid(row=3, column=2, padx=(8, 0), pady=(6, 0))
+
+        ttk.Label(frame, text="Качество загрузки:", style="PanelBold.TLabel").grid(row=4, column=0, sticky="w", pady=(12, 0))
         quality_choices = [
             ("audio", "Только аудио (лучшее)"),
             ("360p", "Видео 360p"),
@@ -804,7 +1064,7 @@ class App(tk.Tk):
         ]
         label_by_code = {code: label for code, label in quality_choices}
         code_by_label = {label: code for code, label in quality_choices}
-        quality_var = tk.StringVar(value=label_by_code.get(self.quality_mode, quality_choices[4][1]))
+        quality_var = tk.StringVar(value=label_by_code.get(self.quality_mode, quality_choices[5][1]))
         quality_cb = ttk.Combobox(
             frame,
             textvariable=quality_var,
@@ -813,18 +1073,66 @@ class App(tk.Tk):
             style="Panel.TCombobox",
             width=40,
         )
-        quality_cb.grid(row=3, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        quality_cb.grid(row=5, column=0, columnspan=3, sticky="we", pady=(6, 0))
         add_tooltip(quality_cb, "Выберите лучшее доступное качество в нужной категории: аудио или целевое разрешение.")
+
+        ttk.Label(frame, text="Итоговый контейнер:", style="PanelBold.TLabel").grid(row=6, column=0, sticky="w", pady=(12, 0))
+        container_choices = [
+            ("auto", "Как в оригинале (без конвертации)"),
+            ("mp4", "MP4 (требуется ffmpeg)"),
+            ("mkv", "MKV (требуется ffmpeg)"),
+            ("webm", "WEBM (требуется ffmpeg)"),
+        ]
+        container_label_by_code = {code: label for code, label in container_choices}
+        container_code_by_label = {label: code for code, label in container_choices}
+        container_var = tk.StringVar(value=container_label_by_code.get(self.container_mode, container_choices[0][1]))
+        container_state = "readonly" if self.ffmpeg_available else "disabled"
+        container_cb = ttk.Combobox(
+            frame,
+            textvariable=container_var,
+            values=[label for _, label in container_choices],
+            state=container_state,
+            style="Panel.TCombobox",
+            width=40,
+        )
+        container_cb.grid(row=7, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        add_tooltip(
+            container_cb,
+            "Выберите итоговый контейнер для файлов. Опции mp4/mkv/webm доступны после установки ffmpeg. "
+            "«Как в оригинале» оставляет контейнер исходного видео.",
+        )
+        if not self.ffmpeg_available:
+            ttk.Label(frame, text="Установите FFmpeg, чтобы выбрать другие контейнеры.", style="Muted.TLabel").grid(
+                row=8, column=0, columnspan=3, sticky="w", pady=(4, 0)
+            )
+
+        auto_update_var = tk.BooleanVar(value=self.auto_update_enabled)
+        auto_update_cb = ttk.Checkbutton(
+            frame,
+            text="Автопроверка обновлений при запуске",
+            variable=auto_update_var,
+            style="Panel.TCheckbutton",
+        )
+        auto_update_cb.grid(row=9, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        add_tooltip(
+            auto_update_cb,
+            "При запуске автоматически проверять наличие новой версии. В сборке .exe обновление установится сразу, "
+            "в режиме Python покажется уведомление.",
+        )
 
         def save_and_close() -> None:
             path = cookies_var.get().strip()
             self._save_cookies_path(path)
             selected_code = code_by_label.get(quality_var.get(), "max")
             self._save_quality_mode(selected_code)
+            selected_container = container_code_by_label.get(container_var.get(), self.container_mode)
+            self._save_container_mode(selected_container)
+            self._save_auto_update(auto_update_var.get())
+            self._save_ffmpeg_path(ffmpeg_var.get())
             win.destroy()
 
         btns = ttk.Frame(frame, style="Panel.TFrame")
-        btns.grid(row=4, column=0, columnspan=3, sticky="we", pady=(12, 0))
+        btns.grid(row=10, column=0, columnspan=3, sticky="we", pady=(12, 0))
         ttk.Button(btns, text="О программе", style="Ghost.TButton", command=self._open_about).grid(row=0, column=0, sticky="w")
         ttk.Button(btns, text="Отмена", style="Ghost.TButton", command=win.destroy).grid(row=0, column=2, sticky="e")
         ttk.Button(btns, text="Сохранить", style="Accent.TButton", command=save_and_close).grid(row=0, column=3, sticky="e", padx=(8, 0))
@@ -935,6 +1243,9 @@ class App(tk.Tk):
         def on_close() -> None:
             self._close(task_id)
 
+        def on_retry() -> None:
+            self._retry(task_id)
+
         row = TaskRow(
             self.scroll.inner,
             title=ctx.info.title,
@@ -943,6 +1254,7 @@ class App(tk.Tk):
             on_resume=on_resume,
             on_delete=on_delete,
             on_close=on_close,
+            on_retry=on_retry,
         )
         row.pack(fill="x", expand=True, pady=6)
         ctx.row = row
@@ -1145,6 +1457,40 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+    def _retry(self, task_id: str) -> None:
+        ctx = self.tasks.get(task_id)
+        if not ctx or not ctx.row:
+            return
+        if ctx.worker and ctx.worker.is_alive():
+            return
+
+        ctx.pause_flag = threading.Event()
+        ctx.cancel_flag = threading.Event()
+        ctx.runtime = TaskRuntime(pause_flag=ctx.pause_flag, cancel_flag=ctx.cancel_flag)
+        ctx.soft_cancelled = False
+        ctx.finished_reported = False
+
+        ctx.row.set_mode("normal", paused=False)
+        ctx.row.update_fields(
+            {
+                "status": "Повтор: подготовка",
+                "progress": 0.0,
+                "speed": "",
+                "eta": "",
+                "total": "",
+                "pct_text": "",
+            }
+        )
+
+        def update(tid: str, fields: Dict[str, Any]) -> None:
+            self.msg_q.put(("task_update", tid, fields))
+
+        def dl_worker() -> None:
+            download_task(task_id=task_id, info=ctx.info, out_dir=ctx.out_dir, runtime=ctx.runtime, update=update)
+
+        ctx.worker = threading.Thread(target=dl_worker, daemon=True)
+        ctx.worker.start()
+
     # -------------- Queue polling -------
 
     def _poll_queue(self) -> None:
@@ -1157,16 +1503,18 @@ class App(tk.Tk):
                 if task_id == "__preview__":
                     if "error" in fields:
                         self.title_var.set("Не удалось получить информацию")
-                        self.preview_label.configure(text="Ошибка", image="")
-                        self._current_preview_tk = None
+                        self._current_preview_tk = load_placeholder_error_to_tk((260, 146))
+                        self.preview_label.configure(image=self._current_preview_tk, text="")
+                        self._log_error(str(fields["error"]))
                     if "info" in fields and isinstance(fields["info"], VideoInfo):
                         self._apply_preview_info(fields["info"])
                     if "thumb_tk" in fields:
                         self._current_preview_tk = fields["thumb_tk"]
                         self.preview_label.configure(image=self._current_preview_tk, text="")
                     if "thumb_err" in fields:
-                        self._current_preview_tk = load_placeholder_to_tk((260, 146))
+                        self._current_preview_tk = load_placeholder_error_to_tk((260, 146))
                         self.preview_label.configure(image=self._current_preview_tk, text="")
+                        self._log_error(str(fields["thumb_err"]))
                     continue
                 
                 if task_id == "__ui__":
@@ -1175,11 +1523,21 @@ class App(tk.Tk):
                         continue
 
                     if "ui_error" in fields:
+                        self._log_error(str(fields["ui_error"]))
                         show_error("Ошибка", str(fields["ui_error"]), parent=self)
                         continue
 
                     if "ui_warning" in fields:
+                        _logger.warning(sanitize_text(str(fields["ui_warning"])))
                         show_warning("Предупреждение", str(fields["ui_warning"]), parent=self)
+                        continue
+
+                    if "ffmpeg_progress" in fields:
+                        self._handle_ffmpeg_progress(fields["ffmpeg_progress"])
+                        continue
+
+                    if "ffmpeg_done" in fields:
+                        self._handle_ffmpeg_done(fields["ffmpeg_done"])
                         continue
 
                     if "update_progress" in fields:
@@ -1225,6 +1583,8 @@ class App(tk.Tk):
 
                 if "thumb_tk" in fields:
                     ctx.row.set_thumbnail(fields["thumb_tk"])
+                if "thumb_err" in fields:
+                    ctx.row.set_thumbnail(load_placeholder_error_to_tk((200, 112)))
 
                 ctx.row.update_fields(fields)
 
@@ -1234,7 +1594,7 @@ class App(tk.Tk):
                     self._on_task_finished(task_id)
                 elif status.startswith("Ошибка"):
                     if not ctx.soft_cancelled:
-                        ctx.row.set_mode("disabled")
+                        ctx.row.set_mode("error")
                     self._on_task_finished(task_id)
                 elif status == "Отменено":
                     self._on_task_finished(task_id)

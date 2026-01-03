@@ -22,7 +22,7 @@ class _Tooltip:
         tw.wm_geometry(f"+{x}+{y}")
         frame = ttk.Frame(tw, padding=(8, 4), style="Panel.TFrame")
         frame.pack(fill="both", expand=True)
-        label = ttk.Label(frame, text=self.text, style="Panel.TLabel", justify="left")
+        label = ttk.Label(frame, text=self.text, style="Panel.TLabel", justify="left", wraplength=320)
         label.pack()
 
     def _hide(self, _event: tk.Event) -> None:

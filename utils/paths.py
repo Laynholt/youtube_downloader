@@ -29,3 +29,7 @@ def default_download_dir() -> Path:
 
 def placeholder_path() -> Path:
     return stuff_dir() / "preview_placeholder.png"
+
+
+def placeholder_error_path() -> Path:
+    return stuff_dir() / "preview_placeholder_error.png"

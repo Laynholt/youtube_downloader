@@ -159,7 +159,7 @@ wheels = [
 ]
 
 [[package]]
-name = "youtube-downloader-qt5"
+name = "youtube-downloader"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

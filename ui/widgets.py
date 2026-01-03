@@ -67,6 +67,7 @@ class TaskRow(ttk.Frame):
         on_resume,
         on_delete,
         on_close,
+        on_retry,
     ) -> None:
         super().__init__(master, padding=(8, 6), style="Panel.TFrame")
 
@@ -75,6 +76,7 @@ class TaskRow(ttk.Frame):
         self._on_resume = on_resume
         self._on_delete = on_delete
         self._on_close = on_close
+        self._on_retry = on_retry
 
         self.thumb_label = ttk.Label(self, text="(нет превью)", width=18, anchor="center", style="Panel.TLabel")
         self.thumb_label.grid(row=0, column=0, rowspan=3, sticky="nsew", padx=(0, 10))
@@ -143,6 +145,14 @@ class TaskRow(ttk.Frame):
             self.btn1.configure(state="disabled")
             self.btn2.configure(state="disabled")
 
+        elif mode == "error":
+            self.btn1_text.set("Повторить")
+            self.btn2_text.set("Закрыть")
+            if not self.btn2.winfo_ismapped():
+                self.btn2.grid(row=2, column=5, sticky="e", padx=(8, 0))
+            self.btn1.configure(state="normal")
+            self.btn2.configure(state="normal")
+
     def update_fields(self, fields: Dict[str, Any]) -> None:
         if "status" in fields:
             self.status_var.set(str(fields["status"]))
@@ -182,9 +192,13 @@ class TaskRow(ttk.Frame):
             self._on_resume()
         elif self.mode == "done":
             self._on_close()
+        elif self.mode == "error":
+            self._on_retry()
 
     def _btn2_clicked(self) -> None:
         if self.mode == "normal":
             self._on_cancel_soft()
         elif self.mode == "soft_cancelled":
             self._on_delete()
+        elif self.mode == "error":
+            self._on_close()

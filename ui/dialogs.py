@@ -6,16 +6,11 @@ from typing import Optional
 import webbrowser
 
 from ui.theme import get_default_colors
+from utils.text_utils import sanitize_text
+
+
 _COLORS = get_default_colors()
-
 _STYLE_APPLIED = False
-
-
-def _sanitize_message(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
-    return text.strip()
 
 
 def _wrap_message(text: str, width: int = 90) -> str:
@@ -58,7 +53,7 @@ def _ensure_style() -> None:
 
 def _show_dialog(kind: str, title: str, message: str, parent: Optional[tk.Widget]) -> None:
     _ensure_style()
-    clean_msg = _sanitize_message(message)
+    clean_msg = sanitize_text(message)
     url_match = re.search(r"https?://\S+", clean_msg)
     url = url_match.group(0).rstrip(".,)") if url_match else ""
     display_source = clean_msg
@@ -159,7 +154,7 @@ def ask_yes_no(title: str, message: str, parent: Optional[tk.Widget] = None, *, 
     Показывает диалог с кнопками Да/Нет, возвращает True/False.
     """
     _ensure_style()
-    clean_msg = _sanitize_message(message)
+    clean_msg = sanitize_text(message)
     display_msg = _wrap_message(clean_msg, width=90)
 
     root = parent if parent is not None else (tk._default_root or tk.Tk())

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import shutil
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 from utils.paths import project_root
+from utils.text_utils import sanitize_text, ensure_file_logger
+from downloader.http_client import download_file
 
 ReleaseInfo = Dict[str, str]
 
@@ -17,6 +20,8 @@ GITHUB_LATEST = "https://api.github.com/repos/Laynholt/youtube_downloader/releas
 ASSET_NAME = "youtube_downloader_windows.zip"
 UPDATE_ARCHIVE_NAME = "update.zip"
 APPLY_SCRIPT_NAME = "apply_update.ps1"
+
+_logger = ensure_file_logger("updater")
 
 
 class UpdateCancelled(Exception):
@@ -62,6 +67,7 @@ def compare_versions(a: str, b: str) -> int:
 
 
 def fetch_latest_release() -> ReleaseInfo:
+    _logger.info("Fetching latest release info")
     req = urllib.request.Request(GITHUB_LATEST, headers={"Accept": "application/vnd.github+json", "User-Agent": "yt-downloader-updater"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -83,34 +89,17 @@ def _download_file(
     progress: Optional[Callable[[str, Optional[float]], None]] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> None:
+    _logger.info("Download update: %s -> %s", url, dst)
     def cancelled() -> bool:
         return bool(cancel and cancel())
 
-    if progress:
-        progress("Скачивание обновления...", None)
+    def on_progress(msg: str, ratio: Optional[float]) -> None:
+        if progress:
+            progress(msg.replace("Загрузка", "Скачивание обновления"), ratio)
+
+    download_file(url, dst, progress=on_progress, cancel=cancelled, user_agent="yt-downloader-updater")
     if cancelled():
         raise UpdateCancelled()
-    req = urllib.request.Request(url, headers={"User-Agent": "yt-downloader-updater"})
-    with urllib.request.urlopen(req, timeout=120) as resp, open(dst, "wb") as f:
-        total = resp.headers.get("Content-Length")
-        total_bytes = int(total) if total and total.isdigit() else None
-        read = 0
-        chunk = 1024 * 64
-        while True:
-            buf = resp.read(chunk)
-            if not buf:
-                break
-            f.write(buf)
-            read += len(buf)
-            if cancelled():
-                raise UpdateCancelled()
-            if progress and total_bytes and total_bytes > 0:
-                ratio = min(1.0, read / total_bytes)
-                progress(f"Скачивание обновления... {int(ratio * 100)}%", ratio)
-        if cancelled():
-            raise UpdateCancelled()
-    if progress:
-        progress("Скачивание завершено", 1.0)
 
 
 def _pick_root_dir(extracted_dir: Path) -> Path:
@@ -284,14 +273,17 @@ def install_update_from_url(
         if progress:
             progress("Файлы скачаны, перезапуск...", 1.0)
 
+        _logger.info("Update downloaded and apply script launched")
         return True, "Обновление загружено."
     except UpdateCancelled:
+        _logger.info("Update download cancelled")
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             pass
         return False, "Загрузка обновления отменена."
     except Exception as e:
+        _logger.error("Update install failed: %s", sanitize_text(e))
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
