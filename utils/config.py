@@ -1,7 +1,7 @@
 import json
 from typing import Any, Dict
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.2.1"
 
 from .paths import config_path, stuff_dir
 

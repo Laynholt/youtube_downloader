@@ -45,6 +45,9 @@ class TaskCtx:
         self.info = info
         self.out_dir = out_dir
         self.playlist_id = playlist_id
+        self.started = False
+        self.url_key: Optional[str] = None
+        self.is_placeholder = False
 
         self.pause_flag = threading.Event()
         self.cancel_flag = threading.Event()
@@ -174,6 +177,7 @@ class App(tk.Tk):
 
         self.msg_q: "queue.Queue[GuiMsg]" = queue.Queue()
         self.tasks: Dict[str, TaskCtx] = {}
+        self._known_urls: set[str] = set()
         self._playlist_batches: Dict[str, Dict[str, Any]] = {}
         self.colors = get_default_colors()
 
@@ -237,6 +241,11 @@ class App(tk.Tk):
         self.url_entry.bind("<FocusOut>", self._url_focus_out)
         self._apply_url_placeholder()
         add_tooltip(self.url_entry, "Вставьте ссылку на видео или плейлист, затем нажмите Enter или «Скачать».")
+        self._attach_context_menu(self.url_entry)
+
+        btn_paste_url = ttk.Button(top, text="Вставить", command=self._paste_url_from_clipboard, style="Ghost.TButton")
+        btn_paste_url.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        add_tooltip(btn_paste_url, "Вставить ссылку из буфера обмена (заменяет текущий текст).")
 
         info = ttk.Frame(self, padding=(12, 0, 12, 12), style="Panel.TFrame")
         info.pack(fill="x")
@@ -255,7 +264,9 @@ class App(tk.Tk):
         folder_row = ttk.Frame(info, style="Panel.TFrame")
         folder_row.grid(row=1, column=1, sticky="we", pady=(8, 0))
         ttk.Label(folder_row, text="Загрузки:", style="Panel.TLabel").pack(side="left")
-        ttk.Entry(folder_row, textvariable=self.folder_var, style="Panel.TEntry").pack(side="left", fill="x", expand=True, padx=(8, 8))
+        self.folder_entry = ttk.Entry(folder_row, textvariable=self.folder_var, style="Panel.TEntry")
+        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        self._attach_context_menu(self.folder_entry)
         btn_choose = ttk.Button(folder_row, text="Выбрать…", command=self._choose_folder, style="Accent.TButton")
         btn_choose.pack(side="left")
         add_tooltip(btn_choose, "Выбрать папку, куда сохранять файлы.")
@@ -296,6 +307,109 @@ class App(tk.Tk):
 
         top.grid_columnconfigure(0, weight=1)
         info.grid_columnconfigure(1, weight=1)
+
+    # -------------- Helpers -------------
+
+    @staticmethod
+    def _url_key(url: Optional[str]) -> str:
+        return (url or "").strip().lower().rstrip("/")
+
+    def _is_duplicate_url(self, url: Optional[str]) -> bool:
+        key = self._url_key(url)
+        return bool(key and key in self._known_urls)
+
+    def _register_task_url(self, ctx: TaskCtx) -> None:
+        key = self._url_key(ctx.info.webpage_url or ctx.info.url)
+        if not key:
+            return
+        ctx.url_key = key
+        self._known_urls.add(key)
+
+    def _forget_task_url(self, ctx: TaskCtx) -> None:
+        if ctx.url_key:
+            self._known_urls.discard(ctx.url_key)
+            ctx.url_key = None
+
+    def _copy_from_widget(self, widget: tk.Widget) -> None:
+        text = ""
+        cls = widget.winfo_class()
+        try:
+            if cls == "Text":
+                text = widget.get("sel.first", "sel.last")  # type: ignore[attr-defined]
+            else:
+                text = widget.selection_get()  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                if cls == "Text":
+                    text = widget.get("1.0", "end-1c")  # type: ignore[attr-defined]
+                else:
+                    text = widget.get()  # type: ignore[attr-defined]
+            except Exception:
+                text = ""
+        if text:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+
+    def _paste_into_widget(self, widget: tk.Widget) -> None:
+        try:
+            clip = self.clipboard_get()
+        except Exception:
+            clip = ""
+        if not clip:
+            return
+
+        if widget is self.url_entry:
+            self._set_url_text(clip.strip())
+            self._on_url_changed(None)  # type: ignore[arg-type]
+            return
+
+        cls = widget.winfo_class()
+        try:
+            if cls == "Text":
+                widget.delete("1.0", "end")  # type: ignore[attr-defined]
+                widget.insert("1.0", clip)   # type: ignore[attr-defined]
+                widget.see("insert")         # type: ignore[attr-defined]
+            else:
+                widget.delete(0, "end")      # type: ignore[attr-defined]
+                widget.insert(0, clip)       # type: ignore[attr-defined]
+                widget.icursor("end")        # type: ignore[attr-defined]
+        except Exception:
+            return
+
+    @staticmethod
+    def _show_context_menu(event: tk.Event, menu: tk.Menu) -> str:
+        try:
+            menu.tk_popup(int(event.x_root), int(event.y_root))
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _attach_context_menu(self, widget: tk.Widget) -> None:
+        menu = tk.Menu(
+            widget,
+            tearoff=0,
+            background=self.colors.get("panel"),
+            foreground=self.colors.get("text"),
+            activebackground=self.colors.get("accent"),
+            activeforeground=self.colors.get("bg"),
+            disabledforeground=self.colors.get("muted"),
+            borderwidth=1,
+            relief="flat",
+        )
+        try:
+            menu.configure(font=("TkDefaultFont", 10))
+        except Exception:
+            pass
+        menu.add_command(label="Вставить", command=lambda w=widget: self._paste_into_widget(w))
+        menu.add_command(label="Копировать", command=lambda w=widget: self._copy_from_widget(w))
+        widget.bind("<Button-3>", lambda e, m=menu: self._show_context_menu(e, m), add="+")
+
+    def _paste_url_from_clipboard(self) -> None:
+        self._paste_into_widget(self.url_entry)
+        try:
+            self.url_entry.focus_set()
+        except Exception:
+            pass
 
     # -------------- Config --------------
 
@@ -1026,6 +1140,7 @@ class App(tk.Tk):
             entry,
             "Файл cookies в формате Netscape. Можно экспортировать из браузера (yt-dlp --cookies-from-browser ... --cookies file.txt).",
         )
+        self._attach_context_menu(entry)
 
         def choose_file() -> None:
             path = filedialog.askopenfilename(
@@ -1042,6 +1157,7 @@ class App(tk.Tk):
         ffmpeg_entry = ttk.Entry(frame, textvariable=ffmpeg_var, width=52, style="Panel.TEntry")
         ffmpeg_entry.grid(row=3, column=0, columnspan=2, sticky="we", pady=(6, 0))
         add_tooltip(ffmpeg_entry, "Укажите путь к ffmpeg (папка с ffmpeg.exe или сам файл).")
+        self._attach_context_menu(ffmpeg_entry)
 
         def choose_ffmpeg_dir() -> None:
             path = filedialog.askdirectory(
@@ -1151,7 +1267,7 @@ class App(tk.Tk):
 
     # -------------- URL debounce --------
 
-    def _on_url_changed(self, _event: tk.Event) -> None:
+    def _on_url_changed(self, _event: Optional[tk.Event]) -> None:
         if self._debounce_job is not None:
             try:
                 self.after_cancel(self._debounce_job)
@@ -1223,6 +1339,8 @@ class App(tk.Tk):
         out_dir: str,
         *,
         playlist_id: Optional[str] = None,
+        start_immediately: bool = True,
+        notify_start: bool = False,
     ) -> str:
         task_id = os.urandom(6).hex()
         ctx = TaskCtx(task_id=task_id, info=info, out_dir=out_dir, playlist_id=playlist_id)
@@ -1259,41 +1377,83 @@ class App(tk.Tk):
         row.pack(fill="x", expand=True, pady=6)
         ctx.row = row
 
-        # подтянуть полное info + превью (как и раньше)
-        url = info.url
+        if start_immediately:
+            self._start_ctx_download(ctx, notify_start=notify_start)
+        else:
+            ctx.is_placeholder = True
+            if ctx.row:
+                ctx.row.update_fields({"status": "Подготовка ссылки:", "progress": 0.0})
+                ctx.row.set_mode("disabled")
+        return task_id
+
+    def _start_ctx_download(self, ctx: TaskCtx, *, notify_start: bool = False) -> None:
+        if ctx.started or not ctx.row:
+            return
+
+        if self._is_duplicate_url(ctx.info.webpage_url or ctx.info.url):
+            show_warning("Дубликат", "Это видео уже находится в очереди или загружается.", parent=self)
+            self._close(ctx.task_id)
+            return
+
+        ctx.started = True
+        ctx.is_placeholder = False
+        ctx.row.set_mode("normal")
+        ctx.row.update_fields({"status": "Подготовка", "progress": 0.0})
+        self._register_task_url(ctx)
+
+        url = ctx.info.url
 
         def info_worker() -> None:
             try:
                 full = fetch_video_info(url)
-                self.msg_q.put(("task_update", task_id, {"info": full}))
+                self.msg_q.put(("task_update", ctx.task_id, {"info": full}))
                 if full.thumbnail_url:
                     try:
                         tk_img = download_thumbnail_to_tk(full.thumbnail_url, max_size=(200, 112))
-                        self.msg_q.put(("task_update", task_id, {"thumb_tk": tk_img}))
+                        self.msg_q.put(("task_update", ctx.task_id, {"thumb_tk": tk_img}))
                     except Exception:
                         pass
             except Exception as e:
-                self.msg_q.put(("task_update", task_id, {"status": f"Инфо не получено: {e}"}))
+                self.msg_q.put(("task_update", ctx.task_id, {"status": f"Инфо не получено: {e}"}))
 
         threading.Thread(target=info_worker, daemon=True).start()
 
-        # запуск скачивания
         def update(tid: str, fields: Dict[str, Any]) -> None:
             self.msg_q.put(("task_update", tid, fields))
 
         def dl_worker() -> None:
-            download_task(task_id=task_id, info=ctx.info, out_dir=ctx.out_dir, runtime=ctx.runtime, update=update)
+            download_task(task_id=ctx.task_id, info=ctx.info, out_dir=ctx.out_dir, runtime=ctx.runtime, update=update)
 
         ctx.worker = threading.Thread(target=dl_worker, daemon=True)
         ctx.worker.start()
-        return task_id
+
+        if notify_start:
+            pass
+
+    def _activate_placeholder_task(self, task_id: Optional[str], info: VideoInfo, *, notify: bool = False) -> bool:
+        if not task_id:
+            return False
+        ctx = self.tasks.get(task_id)
+        if not ctx or not ctx.row:
+            return False
+        ctx.info = info
+        ctx.row.title_var.set(info.title)
+        self._start_ctx_download(ctx, notify_start=notify)
+        return True
+
+    def _remove_placeholder_task(self, task_id: Optional[str]) -> None:
+        if not task_id:
+            return
+        ctx = self.tasks.get(task_id)
+        if ctx and ctx.is_placeholder and not ctx.started:
+            self._close(task_id)
 
     def _enqueue_videos_batched(
         self,
         videos: list[VideoInfo],
         *,
         batch_size: int = 5,
-        delay_ms: int = 1200,
+        delay_ms: int = 600,
         out_dir: Optional[str] = None,
     ) -> None:
         """
@@ -1347,33 +1507,52 @@ class App(tk.Tk):
         if url == self.url_placeholder:
             show_warning("Ссылка", "Вставьте ссылку на видео или плейлист.", parent=self)
             return
+        if self._is_duplicate_url(url):
+            show_warning("Дубликат", "Эта ссылка уже в очереди или загружается.", parent=self)
+            return
 
         out_dir = (self.folder_var.get().strip() or self.download_dir).strip()
         os.makedirs(out_dir, exist_ok=True)
 
         self.download_dir = out_dir
         self._save_download_dir(out_dir)
+        placeholder_title = self.title_var.get() or url
+        if not placeholder_title or placeholder_title == self.default_title:
+            placeholder_title = url
+        placeholder_id = self._create_task_from_videoinfo(
+            VideoInfo(url=url, title=placeholder_title),
+            out_dir,
+            start_immediately=False,
+        )
 
-        # Чтобы UI не фризился — распознаём/разворачиваем в фоне
+        # Чтобы UI не фризился - распознаём/разворачиваем в фоне
         def worker() -> None:
             try:
                 kind, _ = probe_url_kind(url)
                 if kind == "playlist":
                     pl_title, videos = expand_playlist(url)
                     if not videos:
-                        self.msg_q.put(("task_update", "__ui__", {"ui_error": "Плейлист пустой или не удалось прочитать entries"}))
+                        self.msg_q.put(
+                            (
+                                "task_update",
+                                "__ui__",
+                                {"ui_error": "Плейлист пустой или не удалось прочитать entries", "placeholder": placeholder_id},
+                            )
+                        )
                         return
                     # отправим в UI пачку для добавления
-                    self.msg_q.put(("task_update", "__ui__", {"enqueue_many": videos, "playlist_title": pl_title}))
+                    self.msg_q.put(
+                        ("task_update", "__ui__", {"enqueue_many": videos, "playlist_title": pl_title, "placeholder": placeholder_id})
+                    )
                 else:
-                    # обычное видео — создаём один таск
+                    # обычное видео - создаём один таск
                     initial_title = self.title_var.get()
                     if not initial_title or initial_title == self.default_title:
-                        initial_title = "—"
+                        initial_title = "-"
                     vi = VideoInfo(url=url, title=initial_title)
-                    self.msg_q.put(("task_update", "__ui__", {"enqueue_one": vi}))
+                    self.msg_q.put(("task_update", "__ui__", {"enqueue_one": vi, "placeholder": placeholder_id, "notify": True}))
             except Exception as e:
-                self.msg_q.put(("task_update", "__ui__", {"ui_error": str(e)}))
+                self.msg_q.put(("task_update", "__ui__", {"ui_error": str(e), "placeholder": placeholder_id}))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1451,6 +1630,7 @@ class App(tk.Tk):
         if not ctx:
             return
         self._on_task_finished(task_id, ctx)
+        self._forget_task_url(ctx)
         if ctx.row is not None:
             try:
                 ctx.row.destroy()
@@ -1518,12 +1698,15 @@ class App(tk.Tk):
                     continue
                 
                 if task_id == "__ui__":
+                    placeholder_id = fields.get("placeholder")
+
                     if "ui_info" in fields:
                         show_info("Информация", str(fields["ui_info"]), parent=self)
                         continue
 
                     if "ui_error" in fields:
                         self._log_error(str(fields["ui_error"]))
+                        self._remove_placeholder_task(placeholder_id)
                         show_error("Ошибка", str(fields["ui_error"]), parent=self)
                         continue
 
@@ -1560,14 +1743,37 @@ class App(tk.Tk):
                         continue
 
                     if "enqueue_one" in fields and isinstance(fields["enqueue_one"], VideoInfo):
-                        self._create_task_from_videoinfo(fields["enqueue_one"], self.download_dir)
+                        vi = fields["enqueue_one"]
+                        notify = bool(fields.get("notify"))
+                        if self._is_duplicate_url(vi.webpage_url or vi.url):
+                            self._remove_placeholder_task(placeholder_id)
+                            show_warning("Дубликат", "Это видео уже находится в очереди или загружается.", parent=self)
+                            continue
+                        if self._activate_placeholder_task(placeholder_id, vi, notify=notify):
+                            continue
+                        self._create_task_from_videoinfo(vi, self.download_dir, notify_start=notify)
                         continue
 
                     if "enqueue_many" in fields and isinstance(fields["enqueue_many"], list):
                         videos = fields["enqueue_many"]
-                        # Можно показать инфо (не обязательно)
-                        # pl_title = str(fields.get("playlist_title") or "Плейлист")
-                        self._enqueue_videos_batched(videos, out_dir=self.download_dir)
+                        unique: list[VideoInfo] = []
+                        skipped: list[str] = []
+                        seen_batch: set[str] = set()
+                        for vi in videos:
+                            key = self._url_key(getattr(vi, "webpage_url", None) or vi.url)
+                            if key:
+                                if key in self._known_urls or key in seen_batch:
+                                    skipped.append(vi.title or vi.url)
+                                    continue
+                                seen_batch.add(key)
+                            unique.append(vi)
+                        self._remove_placeholder_task(placeholder_id)
+                        if not unique:
+                            show_warning("Дубликат", "Все видео плейлиста уже находятся в очереди.", parent=self)
+                            continue
+                        if skipped:
+                            show_warning("Дубликаты", f"Пропущено {len(skipped)} видео из-за дубликатов.", parent=self)
+                        self._enqueue_videos_batched(unique, out_dir=self.download_dir)
                         continue
 
 
@@ -1628,5 +1834,5 @@ class App(tk.Tk):
             self._playlist_batches.pop(playlist_id, None)
             return
 
-        delay_ms = batch.get("delay_ms", 1200)
+        delay_ms = batch.get("delay_ms", 600)
         self.after(delay_ms, lambda: self._start_playlist_batch(playlist_id))

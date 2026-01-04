@@ -102,23 +102,20 @@ def _paste(root: tk.Tk, w: tk.Widget) -> None:
     cls = w.winfo_class()
 
     if cls == "Text":
-        # заменить выделение если есть
-        rng = _text_sel_range(w)
-        if rng:
-            a, b = rng
-            w.delete(a, b)  # type: ignore[attr-defined]
-        w.insert("insert", s)  # type: ignore[attr-defined]
-        w.see("insert")  # type: ignore[attr-defined]
+        try:
+            # очистить весь текст и вставить новое содержимое
+            w.delete("1.0", "end")  # type: ignore[attr-defined]
+            w.insert("1.0", s)      # type: ignore[attr-defined]
+            w.see("insert")         # type: ignore[attr-defined]
+        except Exception:
+            pass
         return
 
     # Entry/TEntry
-    rng2 = _entry_sel_range(w)
-    if rng2:
-        a, b = rng2
-        w.delete(a, b)  # type: ignore[attr-defined]
-    w.insert("insert", s)  # type: ignore[attr-defined]
     try:
-        w.icursor("insert")  # type: ignore[attr-defined]
+        w.delete(0, "end")          # type: ignore[attr-defined]
+        w.insert(0, s)              # type: ignore[attr-defined]
+        w.icursor("end")            # type: ignore[attr-defined]
     except Exception:
         pass
 
